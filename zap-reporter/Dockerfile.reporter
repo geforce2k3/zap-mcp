@@ -1,0 +1,18 @@
+# 使用輕量級的 Python 基礎映像檔
+FROM python:3.9-slim
+
+# 設定容器內的工作目錄
+WORKDIR /app
+
+# 複製 requirements.txt 並安裝依賴
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# 複製 Python 腳本進去
+COPY ./zap_report_gen.py .
+
+# 建立 data 資料夾 (作為掛載點)
+RUN mkdir /app/data
+
+# 設定容器啟動時執行的指令
+CMD ["python", "zap_report_gen.py"]
