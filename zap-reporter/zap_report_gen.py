@@ -1,12 +1,12 @@
 import json
 import re
 import os
-import matplotlib.pyplot as plt
 from datetime import datetime
 from docx import Document
 from docx.shared import Inches, Pt, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml.ns import qn
+import matplotlib.pyplot as plt
 
 # ==========================================
 # 1. 中英對照字典 (Mapping Dictionary)
@@ -112,7 +112,67 @@ def generate_risk_chart(stats, output_img_path):
     plt.close()
     return True
 
-def generate_word_report(json_path, output_path, company_name="Nextlink MSP"):
+# [Core Feature] Markdown 轉 Word 解析器
+def render_markdown(container, text):
+    """
+    將 Markdown 文字渲染進 docx 的容器中 (Document 或 Table Cell)。
+    支援:
+    1. 粗體 (**text**)
+    2. 程式碼區塊 (``` ... ```) - 會用單色背景標示
+    3. 項目符號 (- item)
+    4. 標題 (### Title)
+    """
+    lines = text.split('\n')
+    in_code_block = False
+    
+    for line in lines:
+        line = line.strip()
+        if not line: continue
+        
+        # 1. 處理程式碼區塊 (```)
+        if line.startswith("```"):
+            in_code_block = not in_code_block
+            continue
+            
+        if in_code_block:
+            # 程式碼樣式：使用固定寬度字體 (Consolas/Courier New)
+            p = container.add_paragraph()
+            run = p.add_run(line)
+            run.font.name = 'Courier New'
+            run.font.size = Pt(10)
+            run.font.color.rgb = RGBColor(50, 50, 50) # 深灰色
+            # 若要底色需更複雜操作，這裡先用顏色區隔
+            continue
+
+        # 2. 處理標題 (###)
+        if line.startswith("### "):
+            container.add_paragraph(line.replace("### ", ""), style='Heading 3')
+            continue
+        elif line.startswith("## "):
+            container.add_paragraph(line.replace("## ", ""), style='Heading 2')
+            continue
+
+        # 3. 處理列表 (- )
+        if line.startswith("- ") or line.startswith("* "):
+            p = container.add_paragraph(style='List Bullet')
+            content = line[2:]
+        else:
+            p = container.add_paragraph()
+            content = line
+
+        # 4. 處理行內粗體 (**text**)
+        # 使用正則表達式切割： "文字 **粗體** 文字" -> ['文字 ', '粗體', ' 文字']
+        parts = re.split(r'(\*\*.*?\*\*)', content)
+        for part in parts:
+            if part.startswith("**") and part.endswith("**"):
+                clean_text = part[2:-2]
+                run = p.add_run(clean_text)
+                run.bold = True
+                run.font.color.rgb = RGBColor(0, 0, 0) # 強制黑色
+            else:
+                p.add_run(part)
+
+def generate_word_report(json_path, output_path, ai_insights_path=None, company_name="Nextlink MSP"):
     try:
         with open(json_path, 'r', encoding='utf-8') as f:
             data = json.load(f)
@@ -120,11 +180,20 @@ def generate_word_report(json_path, output_path, company_name="Nextlink MSP"):
         print(f"讀取 JSON 失敗: {e}")
         return
 
+    # [New] 嘗試讀取 AI 注入的觀點
+    ai_data = {}
+    if ai_insights_path and os.path.exists(ai_insights_path):
+        try:
+            with open(ai_insights_path, 'r', encoding='utf-8') as f:
+                ai_data = json.load(f)
+            print("✅ 成功載入 AI 分析數據！報告將包含 生成式AI 的建議。")
+        except Exception as e:
+            print(f"⚠️ 載入 AI 數據失敗: {e}")
+
     doc = Document()
     style = doc.styles['Normal']
     style.font.name = 'Microsoft JhengHei'
     style.font.size = Pt(11)
-    # 處理中文字型 (確保 Word 認得這是中文字型)
     style.element.rPr.rFonts.set(qn('w:eastAsia'), 'Microsoft JhengHei')
 
     # --- 1. 封面 ---
@@ -207,51 +276,73 @@ def generate_word_report(json_path, output_path, company_name="Nextlink MSP"):
 
     doc.add_page_break()
 
+    if ai_data.get('executive_summary'):
+        doc.add_heading('生成式 AI 總結', level=2)
+        doc.add_paragraph(ai_data['executive_summary'])
+        doc.add_paragraph("") # 空行
+
+    doc.add_page_break()
+
+
+
     # --- 3. 弱點詳情 ---
     doc.add_heading('2. 弱點詳情分析', level=1)
 
     for site in sites:
         alerts = site.get('alerts', [])
-        if not alerts:
-            doc.add_paragraph("未發現顯著弱點。")
-            continue
-
         for alert in alerts:
             eng_name = alert.get('alert', 'Unknown Alert')
             risk_eng = alert.get('riskdesc', 'Info').split(' ')[0]
             desc = clean_html(alert.get('desc', ''))
-            solution = clean_html(alert.get('solution', ''))
+            
+            # 判斷是否使用 AI 建議
+            is_ai_content = False
+            if eng_name in ai_data.get('solutions', {}):
+                solution_text = ai_data['solutions'][eng_name]
+                source_label = "Gemini AI 建議"
+                is_ai_content = True
+            else:
+                solution_text = clean_html(alert.get('solution', ''))
+                source_label = "ZAP 標準建議"
             
             tw_name = translate_title(eng_name)
             tw_risk = RISK_MAPPING.get(risk_eng, risk_eng)
 
-            # 弱點標題
+            # 標題與表格
             doc.add_heading(tw_name, level=2)
             
-            # 詳情表格
-            det_table = doc.add_table(rows=4, cols=2)
+            det_table = doc.add_table(rows=5, cols=2)
             det_table.style = 'Table Grid'
             det_table.columns[0].width = Inches(1.5)
             det_table.columns[1].width = Inches(5.0)
 
+            # ... (填寫前幾列：原名、風險、描述) ...
             det_table.cell(0, 0).text = "弱點原名"
             det_table.cell(0, 1).text = eng_name
-
             det_table.cell(1, 0).text = "風險等級"
-            run = det_table.cell(1, 1).paragraphs[0].add_run(tw_risk)
-            run.bold = True
-            if "High" in risk_eng: run.font.color.rgb = RGBColor(255, 0, 0)
-            elif "Medium" in risk_eng: run.font.color.rgb = RGBColor(255, 165, 0)
-
+            det_table.cell(1, 1).text = tw_risk # (這裡省略顏色設定以節省篇幅，請保留您的程式碼)
             det_table.cell(2, 0).text = "弱點描述"
             det_table.cell(2, 1).text = desc
 
-            det_table.cell(3, 0).text = "建議修復方式"
-            det_table.cell(3, 1).text = solution
+            # [Key Change] 修復建議欄位
+            det_table.cell(3, 0).text = "修復建議"
+            sol_cell = det_table.cell(3, 1)
+            
+            if is_ai_content:
+                # 如果是 AI 內容，使用 Markdown 渲染器
+                render_markdown(sol_cell, solution_text)
+            else:
+                # 如果是 ZAP 原文，直接填入
+                sol_cell.text = solution_text
+
+            det_table.cell(4, 0).text = "建議來源"
+            run_src = det_table.cell(4, 1).paragraphs[0].add_run(source_label)
+            if is_ai_content:
+                run_src.bold = True
+                run_src.font.color.rgb = RGBColor(0, 112, 192)
 
             doc.add_paragraph("")
 
-    # 儲存
     try:
         doc.save(output_path)
         print(f"報告生成完畢！已儲存至: {output_path}")
@@ -261,9 +352,10 @@ def generate_word_report(json_path, output_path, company_name="Nextlink MSP"):
 if __name__ == "__main__":
     DATA_DIR = "/app/data"
     json_file = os.path.join(DATA_DIR, 'ZAP-Report.json')
+    ai_file = os.path.join(DATA_DIR, 'ai_insights.json')
     word_file = os.path.join(DATA_DIR, f'Scan_Report_{datetime.now().strftime("%Y%m%d")}.docx')
     
     if os.path.exists(json_file):
-        generate_word_report(json_file, word_file, company_name="Nextlink MSP")
+        generate_word_report(json_file, word_file, ai_insights_path=ai_file)
     else:
         print(f"找不到檔案: {json_file}")

@@ -232,6 +232,91 @@ def check_status_and_generate_report() -> str:
         return f"⚠️ 報告生成失敗。\n程式回傳錯誤: {error_msg}"
 
 @mcp.tool()
+def get_report_for_analysis() -> str:
+    """
+    【第四步】讀取 ZAP 掃描報告的詳細技術內容，以供 AI 進行資安分析。
+    
+    當使用者要求「分析報告」、「提供修復建議」或「解釋弱點」時，請務必呼叫此工具。
+    它會回傳弱點名稱、描述、風險等級、解決方案與參考文獻連結。
+    """
+    try:
+        # 1. 從 Docker Volume 讀取原始 JSON 報告
+        # 我們使用一個臨時容器來 cat 檔案內容
+        read_cmd = [
+            "docker", "run", "--rm",
+            "-v", f"{SHARED_VOLUME_NAME}:/data",
+            "alpine", "cat", "/data/ZAP-Report.json"
+        ]
+        
+        proc = subprocess.run(read_cmd, capture_output=True, text=True)
+        
+        if proc.returncode != 0:
+            return "⚠️ 無法讀取報告檔案。請確認是否已執行 'check_status_and_generate_report' 且掃描已完成。"
+            
+        # 2. 解析 JSON 並轉換為 AI 易讀的 Markdown 格式
+        data = json.loads(proc.stdout)
+        sites = data.get('site', [])
+        
+        if not sites:
+            return "報告是空的，未發現任何站點資訊。"
+
+        report_context = ["# ZAP 弱點掃描技術分析報告\n"]
+        
+        # 統計資訊
+        report_context.append("## 📊 執行摘要")
+        generated_time = data.get('@generated', 'Unknown Date')
+        report_context.append(f"- 掃描時間: {generated_time}")
+        
+        total_alerts = 0
+        
+        for site in sites:
+            target_host = site.get('@name', 'Unknown Host')
+            target_port = site.get('@port', '80')
+            report_context.append(f"- 目標主機: {target_host}:{target_port}")
+            
+            alerts = site.get('alerts', [])
+            total_alerts += len(alerts)
+            
+            if not alerts:
+                report_context.append("\n(此站點未發現明顯弱點)")
+                continue
+
+            report_context.append(f"\n## 🔍 {target_host} 弱點詳情")
+            
+            for i, alert in enumerate(alerts, 1):
+                # 擷取關鍵欄位
+                name = alert.get('alert', 'Unknown Vulnerability')
+                risk = alert.get('riskdesc', 'Info')
+                desc = alert.get('desc', 'No description provided.').replace('<p>', '').replace('</p>', '\n')
+                solution = alert.get('solution', 'No solution provided.').replace('<p>', '').replace('</p>', '\n')
+                reference = alert.get('reference', '').replace('<p>', '').replace('</p>', '\n')
+                
+                # 組合為結構化文字
+                report_context.append(f"\n### {i}. {name}")
+                report_context.append(f"**🔴 風險等級**: {risk}")
+                report_context.append(f"**📝 弱點描述**: \n{desc[:500]}...") # 截斷過長的描述避免 Token 爆炸
+                report_context.append(f"**🛠️ 建議修復方式**: \n{solution[:500]}...")
+                
+                # 處理參考資料
+                if reference:
+                    refs = [line for line in reference.split('\n') if line.strip()]
+                    if refs:
+                        report_context.append("**📚 技術參考資料**:")
+                        for ref in refs:
+                            report_context.append(f"- {ref.strip()}")
+
+        if total_alerts == 0:
+            return "✅ 恭喜！本次掃描未發現任何風險。"
+            
+        return "\n".join(report_context)
+
+    except json.JSONDecodeError:
+        return "❌ 錯誤：報告 JSON 格式損毀，無法解析。"
+    except Exception as e:
+        return f"❌ 讀取分析資料時發生系統錯誤: {str(e)}"
+
+
+@mcp.tool()
 def retrieve_report() -> str:
     """
     【第三步】將報告匯出到主機指定的資料夾 (例如桌面)。
@@ -284,6 +369,65 @@ def retrieve_report() -> str:
         error_detail = traceback.format_exc()
         print(f"DEBUG: Error - {error_detail}", file=sys.stderr)
         return f"❌ 匯出檔案失敗: {str(e)}\n詳細: {error_detail}"
+
+@mcp.tool()
+def generate_report_with_ai_insights(executive_summary: str, solutions: str) -> str:
+    """
+    【最終步】將 AI 分析後的建議注入並生成最終 Word 報告。
+    
+    當您（AI）完成弱點分析後，請呼叫此工具來生成報告。
+    
+    參數說明:
+    - executive_summary: 您針對整體掃描結果撰寫的「資安顧問總結」段落 (純文字)。
+    - solutions: 一個 JSON 格式的字串。Key 必須是弱點的英文原名 (如 'Cross Site Scripting (Reflected)')，Value 是您提供的詳細修復建議與程式碼範例。
+                 格式範例: '{"Cross Site Scripting (Reflected)": "建議使用 html.escape() 處理...", "SQL Injection": "請使用參數化查詢..."}'
+    """
+    try:
+        # 1. 驗證並儲存 AI 的建議數據
+        try:
+            solutions_dict = json.loads(solutions)
+        except json.JSONDecodeError:
+            return "❌ 錯誤：solutions 參數必須是有效的 JSON 字串。"
+
+        ai_data = {
+            "executive_summary": executive_summary,
+            "solutions": solutions_dict
+        }
+
+        # 寫入到共享 Volume，讓 Reporter 讀取
+        # 我們利用一個臨時容器寫入檔案 (因為 shared volume 在 host 上的路徑對 mcp 容器來說可能不同，直接用 volume 寫入最保險)
+        # 但這裡為了簡便，我們假設 MCP 容器已經掛載了 /app/data -> zap_shared_data (我們在 Dockerfile.mcp 裡有做)
+        # 所以直接寫入 /app/data 即可
+        
+        local_ai_path = os.path.join(INTERNAL_DATA_DIR, "ai_insights.json")
+        with open(local_ai_path, "w", encoding="utf-8") as f:
+            json.dump(ai_data, f, ensure_ascii=False, indent=2)
+
+        # 2. 呼叫 Reporter 容器生成 Word
+        print("DEBUG: AI 數據已儲存，啟動 Reporter...", file=sys.stderr)
+        
+        reporter_cmd = [
+            "docker", "run", "--rm",
+            "-v", f"{SHARED_VOLUME_NAME}:/app/data",
+            "zap-reporter:latest"
+        ]
+        
+        proc = subprocess.run(reporter_cmd, check=True, capture_output=True, text=True)
+        print(f"DEBUG: Reporter Log: {proc.stdout}", file=sys.stderr)
+
+        return f"""
+✅ **AI 智慧報告已生成！**
+
+您的專業分析已成功注入到 Word 報告中。
+* 已包含「AI 資安顧問總結」
+* 已針對 {len(solutions_dict)} 個弱點替換了詳細修復建議
+
+請執行 `retrieve_report` 將最終報告取出。
+"""
+
+    except Exception as e:
+        return f"❌ 生成報告時發生錯誤: {str(e)}"
+
 
 # 程式進入點 - 只保留一個
 if __name__ == "__main__":
