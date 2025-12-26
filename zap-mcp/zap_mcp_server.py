@@ -8,6 +8,8 @@ import traceback
 import shutil
 import re
 import logging
+import requests # [New] 用於執行登入
+from urllib.parse import urlparse
 from mcp.server.fastmcp import FastMCP
 
 # [Short-term Goal 1] 設定結構化日誌
@@ -79,74 +81,163 @@ def parse_zap_progress(container_name):
             return "初始化或處理中..."
     except Exception:
         return "無法取得進度細節"
-
+# ==========================================
+# [New] 新增工具：自動登入並取得 Cookie
+# ==========================================
 @mcp.tool()
-def start_scan_job(target_url: str, scan_type: str = "baseline", aggressive: bool = False) -> str:
+def perform_login_and_get_cookie(
+    login_url: str,
+    username: str,
+    password: str,
+    username_field: str = "username",
+    password_field: str = "password",
+    submit_url: str = None
+) -> str:
     """
-    【第一步】啟動 ZAP 弱點掃描任務 (背景執行)。
+    【輔助工具】針對「使用者帳號密碼」登入的網站，執行登入並取得 Cookie 字串。
+    
+    參數:
+    - login_url: 登入頁面網址 (例如 http://example.com/login)
+    - username: 帳號
+    - password: 密碼
+    - username_field: 表單中帳號欄位的 name (預設 "username" 或 "email")
+    - password_field: 表單中密碼欄位的 name (預設 "password")
+    - submit_url: (選填) 如果表單提交到不同網址，請填寫。若未填則預設為 login_url。
+    
+    回傳:
+    - 成功登入後的 Cookie 字串 (格式: "key=value; key2=value2")，可直接用於 start_scan_job。
     """
-    # [Security] 執行安全檢查
-    if not is_safe_url(target_url):
-        logger.warning(f"拒絕不安全的 URL請求: {target_url}")
-        return "錯誤：網址格式不合法或包含危險字元。為了安全起見，僅允許標準 http/https 網址，且不得包含特殊符號。"
+    logger.info(f"執行自動登入: {login_url} User={username}")
+    
+    try:
+        session = requests.Session()
+        # 1. 先 GET 一次頁面，取得 CSRF Token (若有) 或初始化 Cookie
+        # 這裡做個簡單的 User-Agent 偽裝
+        session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0'
+        })
+        
+        response = session.get(login_url, timeout=10)
+        if response.status_code != 200:
+            return f"無法存取登入頁面 (Status: {response.status_code})"
 
-    logger.info(f"接收掃描請求: URL={target_url}, Type={scan_type}, Aggressive={aggressive}")
+        # 2. 準備登入資料
+        payload = {
+            username_field: username,
+            password_field: password
+        }
+        
+        # TODO: 若網站有 CSRF Token，這裡需要 BeautifulSoup 解析並放入 payload
+        # 簡單版暫不處理複雜 CSRF，適用於一般測試站或 API
+        
+        target_url = submit_url if submit_url else login_url
+        
+        # 3. 送出 POST 登入
+        post_response = session.post(target_url, data=payload, timeout=10)
+        
+        if post_response.status_code not in [200, 302, 303]:
+             return f"登入請求回應異常 (Status: {post_response.status_code})，可能登入失敗。"
+
+        # 4. 提取 Cookie
+        cookies = session.cookies.get_dict()
+        if not cookies:
+            return "登入後未發現任何 Cookie，請確認帳號密碼或欄位名稱是否正確。"
+            
+        # 格式化為 Header 字串
+        cookie_string = "; ".join([f"{k}={v}" for k, v in cookies.items()])
+        
+        return f"""
+**登入成功！** (或已取得 Cookie)
+
+**Cookie 字串**: 
+`{cookie_string}`
+
+您可以接著呼叫 `start_scan_job`，將此字串填入 `auth_value`，並設定 `auth_header='Cookie'`。
+"""
+    except Exception as e:
+        return f"登入過程發生錯誤: {str(e)}"
+
+# ==========================================
+# [Enhanced] 掃描工具 (支援 Auth)
+# ==========================================
+@mcp.tool()
+def start_scan_job(
+    target_url: str, 
+    scan_type: str = "baseline", 
+    aggressive: bool = False,
+    auth_header: str = None,  
+    auth_value: str = None    
+) -> str:
+    """
+    【第一步】啟動 ZAP 弱點掃描任務 (支援身分驗證)。
+    
+    參數:
+    - target_url: 目標網址
+    - scan_type: 'baseline' / 'full'
+    - aggressive: True 開啟積極模式
+    - auth_header: (選填) 驗證標頭名稱。若使用 Bearer Token 請填 'Authorization'；若使用 Cookie 請填 'Cookie'。
+    - auth_value: (選填) 驗證內容。例如 'Bearer xyz...' 或 'session_id=abc...'。
+    """
+    if not is_safe_url(target_url):
+        return "錯誤：網址格式不合法。"
+
+    logger.info(f"接收掃描請求: URL={target_url}, Type={scan_type}, Auth={bool(auth_value)}")
 
     json_filename = "ZAP-Report.json"
     script_name = "zap-full-scan.py" if scan_type == "full" else "zap-baseline.py"
     
-    # 1. 清理舊的容器
     subprocess.run(["docker", "rm", "-f", SCAN_CONTAINER_NAME], capture_output=True)
 
-    # 2. 準備基礎 Docker 指令
+    zap_configs = []
+    mode_desc = []
+
+    # [Auth] 注入驗證標頭 (使用 ZAP Replacer)
+    if auth_header and auth_value:
+        zap_configs.extend([
+            "-config", "replacer.full_list(0).description=MCP_Auth",
+            "-config", "replacer.full_list(0).enabled=true",
+            "-config", "replacer.full_list(0).matchtype=REQ_HEADER",
+            "-config", f"replacer.full_list(0).matchstr={auth_header}",
+            "-config", "replacer.full_list(0).regex=false",
+            "-config", f"replacer.full_list(0).replacement={auth_value}" # ZAP 會將此值填入 Header
+        ])
+        mode_desc.append("🔐 Authenticated")
+
+    if aggressive:
+        mode_desc.append("🕷️ Aggressive")
+
     zap_cmd = [
-        "docker", "run", 
-        "-d",                              
-        "--name", SCAN_CONTAINER_NAME,     
-        "-u", "0",                         
-        "--dns", "8.8.8.8",                
+        "docker", "run", "-d", "--name", SCAN_CONTAINER_NAME, "-u", "0",
+        "--dns", "8.8.8.8",
         "-v", f"{SHARED_VOLUME_NAME}:/zap/wrk:rw", 
         "-t", "zaproxy/zap-stable",
-        script_name, 
-        "-t", target_url,
-        "-J", json_filename,
-        "-I"                               
+        script_name, "-t", target_url, "-J", json_filename, "-I"
     ]
-
-    # 3. 處理積極模式參數
-    mode_desc = []
+    
     if aggressive:
         zap_cmd.append("-j")
-        mode_desc.append("🕷️ AJAX Spider")
         zap_cmd.append("-a")
-        mode_desc.append("🧪 Alpha Rules")
         if scan_type == "full":
-            zap_cmd.extend(["-z", "-config scanner.strength=HIGH -config scanner.threadPerHost=10"])
+            zap_configs.extend(["-config", "scanner.strength=HIGH", "-config", "scanner.threadPerHost=10"])
             mode_desc.append("High Strength")
-    
-    aggressive_text = " / ".join(mode_desc) if aggressive else "標準模式 (Standard)"
-    scan_mode_text = "完整攻擊掃描 (Full)" if scan_type == "full" else "基礎被動掃描 (Baseline)"
+
+    if zap_configs:
+        zap_cmd.extend(["-z", " ".join(zap_configs)])
+
+    aggressive_text = " / ".join(mode_desc) if mode_desc else "Standard"
 
     try:
-        logger.info(f"Docker Command: {' '.join(zap_cmd)}")
         result = subprocess.run(zap_cmd, check=False, capture_output=True, text=True)
+        if result.returncode != 0: return f"啟動失敗: {result.stderr}"
         
-        if result.returncode != 0 and result.stderr:
-             logger.error(f"Docker Run Failed: {result.stderr}")
-             return f"啟動失敗: {result.stderr}"
-
         return f"""
-**掃描任務已成功啟動！**
-
+**掃描任務已啟動！**
 * **目標**: {target_url}
-* **模式**: {scan_mode_text}
-* **策略**: {aggressive_text}
-* **狀態**: 正在背景執行中...
+* **模式**: {aggressive_text}
+* **驗證**: {'已啟用 (' + auth_header + ')' if auth_header else '無'}
 """
     except Exception as e:
-        logger.exception("啟動掃描時發生例外")
         return f"系統錯誤: {str(e)}"
-
 @mcp.tool()
 def check_status_and_generate_report() -> str:
     """

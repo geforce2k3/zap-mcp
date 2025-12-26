@@ -1,16 +1,46 @@
 import json
 import re
 import os
+import time
 from datetime import datetime
 from docx import Document
 from docx.shared import Inches, Pt, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml.ns import qn
 import matplotlib.pyplot as plt
+from deep_translator import GoogleTranslator
 
 # ==========================================
-# 1. 中英對照字典 (Mapping Dictionary)
+# 1. 翻譯與對照設定
 # ==========================================
+
+# 初始化翻譯器 (目標語言：繁體中文)
+translator = GoogleTranslator(source='auto', target='zh-TW')
+
+# 翻譯快取，避免重複請求導致慢或被擋
+TRANSLATION_CACHE = {}
+
+def auto_translate(text):
+    """
+    [New] 自動翻譯功能
+    使用 Google Translate 將英文描述轉為繁體中文
+    """
+    if not text or len(text) < 2:
+        return text
+        
+    # 如果已經翻譯過，直接回傳
+    if text in TRANSLATION_CACHE:
+        return TRANSLATION_CACHE[text]
+    
+    try:
+        # 限制長度以免翻譯失敗，通常描述不會超過 4500 字元
+        translate_text = text[:4500]
+        result = translator.translate(translate_text)
+        TRANSLATION_CACHE[text] = result
+        return result
+    except Exception as e:
+        print(f"⚠️ 翻譯失敗 (使用原文): {e}")
+        return text
 
 RISK_MAPPING = {
     "High": "高風險 (High)",
@@ -47,10 +77,6 @@ TERM_MAPPING = {
     "Private IP Disclosure": "內部 IP 位址洩漏",
     "Session ID in URL Rewrite": "Session ID 暴露於 URL",
     "Source Code Disclosure": "原始碼洩漏",
-    "AWS Identity and Access Management (IAM)": "AWS 身分與存取管理",
-    "Amazon S3 (Simple Storage Service)": "Amazon S3 物件儲存服務",
-    "CloudTrail": "AWS 操作紀錄稽核服務",
-    "Cloud IAM": "Google Cloud 身分與存取管理",
 }
 
 # ==========================================
@@ -102,35 +128,19 @@ def generate_risk_chart(stats, output_img_path):
     return True
 
 def parse_ai_response(text):
-    """
-    [New] 智慧解析器：將 AI 的 Markdown 回應拆解為結構化區塊
-    自動偵測：弱點說明、解決方法、參考資料
-    """
-    sections = {
-        'explanation': '',  # 對應「弱點說明」
-        'solution': '',     # 對應「解決方法」
-        'reference': ''     # 對應「參考資料」
-    }
-    
+    """智慧解析器：將 AI 的 Markdown 回應拆解為結構化區塊"""
+    sections = {'explanation': '', 'solution': '', 'reference': ''}
     current_section = None
     buffer = []
-    
     lines = text.split('\n')
-    
-    # 定義標題偵測的正則表達式
-    # 支援 ### 標題, **標題**, 或純文字標題
     header_regex = re.compile(r'^(#+\s*|\*\*)?(弱點說明|修復建議|解決方法|參考資料|Explanation|Solution|Reference)([:：])?(\*\*)?\s*$')
 
     for line in lines:
         stripped = line.strip()
         match = header_regex.match(stripped)
-        
         if match:
-            # 如果 buffer 有內容，先存入上一個 section
             if current_section and buffer:
                 sections[current_section] = '\n'.join(buffer).strip()
-            
-            # 判斷新的 section 類型
             header_text = match.group(2)
             if '弱點說明' in header_text or 'Explanation' in header_text:
                 current_section = 'explanation'
@@ -138,28 +148,19 @@ def parse_ai_response(text):
                 current_section = 'solution'
             elif '參考資料' in header_text or 'Reference' in header_text:
                 current_section = 'reference'
-            
-            buffer = [] # 清空 buffer 準備接收新內容
+            buffer = []
             continue
-            
-        # 累積內容
         if current_section:
             buffer.append(line)
         else:
-            # 如果還沒遇到任何標題，且內容不為空，預設視為 explanation
-            if stripped:
-                if not sections['explanation']:
-                    current_section = 'explanation'
-                    buffer.append(line)
+            if stripped and not sections['explanation']:
+                current_section = 'explanation'
+                buffer.append(line)
     
-    # 迴圈結束，存入最後一段
     if current_section and buffer:
         sections[current_section] = '\n'.join(buffer).strip()
-        
-    # 防呆：如果完全沒抓到任何標題，將整段文字當作 solution
     if not any(sections.values()):
         return {'solution': text}
-        
     return sections
 
 # [Enhanced] 超級版 Markdown 渲染器 (含表格支援)
@@ -193,10 +194,8 @@ def render_markdown(container, text):
         if not buffer: return
         rows_data = [line.strip().strip('|').split('|') for line in buffer]
         rows_data = [[c.strip() for c in r] for r in rows_data]
-        
         if not rows_data: return
         
-        # 判斷分隔線
         headers = None
         body_start = 0
         if len(rows_data) > 1 and all(set(c) <= set('-: ') for c in rows_data[1]):
@@ -385,7 +384,7 @@ def generate_word_report(json_path, output_path, ai_insights_path=None, company_
 
             doc.add_heading(tw_name, level=2)
             
-            # [Key Change] 動態建立表格
+            # 動態建立表格
             det_table = doc.add_table(rows=0, cols=2)
             det_table.style = 'Table Grid'
             det_table.columns[0].width = Inches(1.5)
@@ -412,27 +411,34 @@ def generate_word_report(json_path, output_path, ai_insights_path=None, company_
             elif "Medium" in risk_eng: risk_color = RGBColor(255, 165, 0)
             add_row("風險等級", tw_risk, color=risk_color)
             
-            add_row("弱點描述", desc)
+            # [Translation Feature] 自動翻譯描述
+            # 若有 AI 解釋則用 AI，否則用翻譯過的原描述
+            if parsed_ai and parsed_ai.get('explanation'):
+                # 這裡不需要做什麼，下面會加 AI 分析欄位
+                # 但原本的 "弱點描述" 欄位還是要填，我們用翻譯過的 desc
+                zh_desc = auto_translate(desc)
+                add_row("弱點描述", zh_desc)
+            else:
+                zh_desc = auto_translate(desc)
+                add_row("弱點描述", zh_desc)
 
             # 2. 修復建議區塊 (AI vs ZAP)
             if parsed_ai:
-                # 欄位一：弱點說明 (AI)
                 if parsed_ai.get('explanation'):
                     add_row("弱點分析 (AI)", parsed_ai['explanation'], is_md=True)
                 
-                # 欄位二：解決方法 (AI)
-                sol_content = parsed_ai.get('solution') or ai_content # Fallback
+                sol_content = parsed_ai.get('solution') or ai_content
                 add_row("修復建議 (AI)", sol_content, is_md=True)
                 
-                # 欄位三：參考資料 (AI)
                 if parsed_ai.get('reference'):
                     add_row("技術參考 (AI)", parsed_ai['reference'], is_md=True)
                 
                 source_label = "生成式 AI 建議"
             else:
-                # ZAP 標準建議
+                # ZAP 標準建議 (也進行翻譯)
                 solution_text = clean_html(alert.get('solution', ''))
-                add_row("修復建議", solution_text)
+                zh_solution = auto_translate(solution_text)
+                add_row("修復建議", zh_solution)
                 source_label = "ZAP 標準建議"
 
             # 3. 來源標示
