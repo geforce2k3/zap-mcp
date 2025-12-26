@@ -113,15 +113,19 @@ def generate_risk_chart(stats, output_img_path):
     return True
 
 # [Core Feature] Markdown 轉 Word 解析器
+# [Enhanced] 強力版 Markdown 渲染器
 def render_markdown(container, text):
     """
-    將 Markdown 文字渲染進 docx 的容器中 (Document 或 Table Cell)。
-    支援:
-    1. 粗體 (**text**)
-    2. 程式碼區塊 (``` ... ```) - 會用單色背景標示
-    3. 項目符號 (- item)
-    4. 標題 (### Title)
+    將 Markdown 文字渲染進 docx 的容器中。
+    支援: 標題(###), 列表(-/1.), 程式碼區塊(```), 行內粗體(**), 行內程式碼(`)
     """
+    if not text: return
+
+    # 預先編譯 Regex：同時捕捉 **粗體** 與 `行內程式碼`
+    # Group 1: **bold**
+    # Group 2: `code`
+    token_pattern = re.compile(r'(\*\*.*?\*\*)|(`.*?`)')
+
     lines = text.split('\n')
     in_code_block = False
     
@@ -129,47 +133,71 @@ def render_markdown(container, text):
         line = line.strip()
         if not line: continue
         
-        # 1. 處理程式碼區塊 (```)
+        # --- 1. 處理程式碼區塊 (Code Block) ---
         if line.startswith("```"):
             in_code_block = not in_code_block
             continue
             
         if in_code_block:
-            # 程式碼樣式：使用固定寬度字體 (Consolas/Courier New)
             p = container.add_paragraph()
+            p.paragraph_format.left_indent = Inches(0.2) # 縮排增加層次感
             run = p.add_run(line)
             run.font.name = 'Courier New'
-            run.font.size = Pt(10)
-            run.font.color.rgb = RGBColor(50, 50, 50) # 深灰色
-            # 若要底色需更複雜操作，這裡先用顏色區隔
+            run.font.size = Pt(9.5)
+            run.font.color.rgb = RGBColor(80, 80, 80)
             continue
 
-        # 2. 處理標題 (###)
-        if line.startswith("### "):
-            container.add_paragraph(line.replace("### ", ""), style='Heading 3')
-            continue
-        elif line.startswith("## "):
-            container.add_paragraph(line.replace("## ", ""), style='Heading 2')
+        # --- 2. 處理標題 (Heading) ---
+        if line.startswith("### ") or line.startswith("## "):
+            clean_text = line.lstrip("#").strip()
+            p = container.add_paragraph()
+            p.paragraph_format.space_before = Pt(6)
+            p.paragraph_format.space_after = Pt(3)
+            run = p.add_run(clean_text)
+            run.bold = True
+            run.font.size = Pt(13)
+            run.font.color.rgb = RGBColor(46, 116, 181) # 專業藍
             continue
 
-        # 3. 處理列表 (- )
+        # --- 3. 處理列表 (List) ---
+        p = None
+        content = line
+        
+        # 項目符號 (- item)
         if line.startswith("- ") or line.startswith("* "):
-            p = container.add_paragraph(style='List Bullet')
+            try: p = container.add_paragraph(style='List Bullet')
+            except: p = container.add_paragraph(style='List Paragraph')
             content = line[2:]
-        else:
+        
+        # 數字列表 (1. item)
+        elif re.match(r'^\d+\.\s', line):
+            try: p = container.add_paragraph(style='List Number')
+            except: p = container.add_paragraph(style='List Paragraph')
+            content = re.sub(r'^\d+\.\s', '', line) # 移除原本的數字，讓 Word 自動編號(或僅縮排)
+
+        # 普通段落
+        if p is None:
             p = container.add_paragraph()
             content = line
 
-        # 4. 處理行內粗體 (**text**)
-        # 使用正則表達式切割： "文字 **粗體** 文字" -> ['文字 ', '粗體', ' 文字']
-        parts = re.split(r'(\*\*.*?\*\*)', content)
+        # --- 4. 處理行內格式 (Inline Formatting) ---
+        # 使用 split 切割： [text, **bold**, text, `code`, text]
+        parts = token_pattern.split(content)
+        
         for part in parts:
-            if part.startswith("**") and part.endswith("**"):
-                clean_text = part[2:-2]
-                run = p.add_run(clean_text)
+            if not part: continue
+            
+            if part.startswith("`") and part.endswith("`"):
+                # 行內程式碼
+                run = p.add_run(part[1:-1])
+                run.font.name = 'Courier New'
+                run.font.color.rgb = RGBColor(180, 0, 0) # 暗紅標示
+            elif part.startswith("**") and part.endswith("**"):
+                # 粗體
+                run = p.add_run(part[2:-2])
                 run.bold = True
-                run.font.color.rgb = RGBColor(0, 0, 0) # 強制黑色
             else:
+                # 純文字
                 p.add_run(part)
 
 def generate_word_report(json_path, output_path, ai_insights_path=None, company_name="Nextlink MSP"):
@@ -278,7 +306,8 @@ def generate_word_report(json_path, output_path, ai_insights_path=None, company_
 
     if ai_data.get('executive_summary'):
         doc.add_heading('生成式 AI 總結', level=2)
-        doc.add_paragraph(ai_data['executive_summary'])
+        # [Fix] 改用渲染器，而不是直接貼上純文字
+        render_markdown(doc, ai_data['executive_summary'])
         doc.add_paragraph("") # 空行
 
     doc.add_page_break()
@@ -299,7 +328,7 @@ def generate_word_report(json_path, output_path, ai_insights_path=None, company_
             is_ai_content = False
             if eng_name in ai_data.get('solutions', {}):
                 solution_text = ai_data['solutions'][eng_name]
-                source_label = "Gemini AI 建議"
+                source_label = "生成式 AI 建議"
                 is_ai_content = True
             else:
                 solution_text = clean_html(alert.get('solution', ''))
