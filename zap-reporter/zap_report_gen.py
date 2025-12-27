@@ -2,75 +2,71 @@ import json
 import re
 import os
 import time
+import shutil
 from datetime import datetime
 from docx import Document
 from docx.shared import Inches, Pt, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml.ns import qn
 import matplotlib.pyplot as plt
-from deep_translator import GoogleTranslator
+import matplotlib.font_manager as fm
 
 # ==========================================
-# 1. 翻譯與對照設定 (含持久化快取)
+# 0. 字型與環境設定 (修復亂碼關鍵)
 # ==========================================
 
-translator = GoogleTranslator(source='auto', target='zh-TW')
+# 嘗試清除 Matplotlib 快取，確保能讀到新安裝的字型
+try:
+    cache_dir = fm.get_cachedir()
+    if os.path.exists(cache_dir):
+        shutil.rmtree(cache_dir)
+except: pass
 
-# 定義快取檔案路徑 (存放在 volume 中，重啟容器也不會消失)
-CACHE_FILE = "/app/data/translation_cache.json"
-TRANSLATION_CACHE = {}
-
-# 啟動時載入快取
-if os.path.exists(CACHE_FILE):
-    try:
-        with open(CACHE_FILE, 'r', encoding='utf-8') as f:
-            TRANSLATION_CACHE = json.load(f)
-    except:
-        print("讀取翻譯快取失敗，將建立新快取")
-
-def save_cache():
-    """將記憶體中的翻譯儲存到檔案"""
-    try:
-        with open(CACHE_FILE, 'w', encoding='utf-8') as f:
-            json.dump(TRANSLATION_CACHE, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        print(f"無法寫入翻譯快取: {e}")
-
-def auto_translate(text):
-    if not text or len(text) < 2: return text
-    
-    # 查表 (快取命中)
-    if text in TRANSLATION_CACHE: 
-        return TRANSLATION_CACHE[text]
-    
-    try:
-        # 呼叫 Google Translate
-        result = translator.translate(text[:4500])
-        # 寫入快取
-        TRANSLATION_CACHE[text] = result
-        return result
-    except Exception as e:
-        print(f"翻譯失敗: {e}")
-        return text
+# 設定中文字型優先順序
+# 容器內通常是 'Noto Sans CJK TC' 或 'Noto Sans CJK SC'
+plt.rcParams['font.family'] = ['sans-serif']
+plt.rcParams['font.sans-serif'] = ['Noto Sans CJK TC', 'Noto Sans CJK SC', 'WenQuanYi Micro Hei', 'Microsoft JhengHei', 'SimHei', 'sans-serif']
+plt.rcParams['axes.unicode_minus'] = False 
 
 # ==========================================
 # 1. 翻譯與對照設定
 # ==========================================
 
-translator = GoogleTranslator(source='auto', target='zh-TW')
+try:
+    from deep_translator import GoogleTranslator
+    HAS_TRANSLATOR = True
+    translator = GoogleTranslator(source='auto', target='zh-TW')
+except ImportError:
+    HAS_TRANSLATOR = False
+    translator = None
+    print("⚠️ 警告: 找不到 deep-translator 模組，將跳過翻譯功能。")
+
+CACHE_FILE = "/app/data/translation_cache.json"
 TRANSLATION_CACHE = {}
+
+if os.path.exists(CACHE_FILE):
+    try:
+        with open(CACHE_FILE, 'r', encoding='utf-8') as f:
+            TRANSLATION_CACHE = json.load(f)
+    except: pass
+
+def save_cache():
+    try:
+        with open(CACHE_FILE, 'w', encoding='utf-8') as f:
+            json.dump(TRANSLATION_CACHE, f, ensure_ascii=False, indent=2)
+    except: pass
 
 def auto_translate(text):
     if not text or len(text) < 2: return text
     if text in TRANSLATION_CACHE: return TRANSLATION_CACHE[text]
+    if not HAS_TRANSLATOR: return text
     try:
         result = translator.translate(text[:4500])
         TRANSLATION_CACHE[text] = result
         return result
-    except Exception as e:
-        print(f"⚠️ 翻譯失敗: {e}")
-        return text
+    except: return text
 
+# [關鍵修復] 完整的風險映射字典
 RISK_MAPPING = {
     "High": "高風險 (High)",
     "Medium": "中風險 (Medium)",
@@ -79,6 +75,7 @@ RISK_MAPPING = {
     "False Positive": "誤報 (False Positive)"
 }
 
+# [關鍵修復] 完整的弱點對照字典 (TERM_MAPPING)
 TERM_MAPPING = {
     "Cross Site Scripting (Reflected)": "反射型跨站腳本攻擊 (XSS)",
     "Cross Site Scripting (Persistent)": "儲存型跨站腳本攻擊 (XSS)",
@@ -106,6 +103,10 @@ TERM_MAPPING = {
     "Private IP Disclosure": "內部 IP 位址洩漏",
     "Session ID in URL Rewrite": "Session ID 暴露於 URL",
     "Source Code Disclosure": "原始碼洩漏",
+    "AWS Identity and Access Management (IAM)": "AWS 身分與存取管理",
+    "Amazon S3 (Simple Storage Service)": "Amazon S3 物件儲存服務",
+    "CloudTrail": "AWS 操作紀錄稽核服務",
+    "Cloud IAM": "Google Cloud 身分與存取管理",
 }
 
 # ==========================================
@@ -118,6 +119,7 @@ def clean_html(raw_html):
     return re.sub(cleanr, '', raw_html).strip()
 
 def translate_title(english_title):
+    # 若找不到對應，則直接回傳原文
     return TERM_MAPPING.get(english_title, english_title)
 
 def set_table_header_style(cell):
@@ -138,27 +140,31 @@ def generate_risk_chart(stats, output_img_path):
         "Informational": ("資訊", "#0000ff")
     }
     for key, (label, color) in mapping.items():
-        if stats[key] > 0:
+        if stats.get(key, 0) > 0:
             labels.append(f"{label} ({stats[key]})")
             sizes.append(stats[key])
             colors.append(color)
             
     if not sizes: return False
 
-    plt.figure(figsize=(4, 3))
-    plt.pie(sizes, labels=labels, colors=colors, autopct='%1.1f%%', startangle=140)
-    plt.axis('equal')
-    plt.title("弱點風險分佈", fontname="Microsoft JhengHei")
-    plt.tight_layout()
-    plt.savefig(output_img_path)
-    plt.close()
-    return True
+    try:
+        plt.figure(figsize=(4, 3))
+        plt.pie(sizes, labels=labels, colors=colors, autopct='%1.1f%%', startangle=140)
+        plt.axis('equal')
+        plt.title("弱點風險分佈") # 這裡會用到中文字型
+        plt.tight_layout()
+        plt.savefig(output_img_path)
+        plt.close()
+        return True
+    except Exception as e:
+        print(f"繪圖失敗: {e}")
+        return False
 
 def parse_ai_response(text):
     sections = {'explanation': '', 'solution': '', 'reference': ''}
     current_section = None
     buffer = []
-    lines = text.split('\n')
+    lines = str(text).split('\n')
     header_regex = re.compile(r'^(#+\s*|\*\*)?(弱點說明|修復建議|解決方法|參考資料|Explanation|Solution|Reference)([:：])?(\*\*)?\s*$')
 
     for line in lines:
@@ -186,12 +192,12 @@ def parse_ai_response(text):
     if current_section and buffer:
         sections[current_section] = '\n'.join(buffer).strip()
     if not any(sections.values()):
-        return {'solution': text}
+        return {'solution': str(text)}
     return sections
 
 def render_markdown(container, text):
     if not text: return
-    lines = text.split('\n')
+    lines = str(text).split('\n')
     in_code_block = False
     table_buffer = [] 
 
@@ -215,21 +221,17 @@ def render_markdown(container, text):
         rows_data = [line.strip().strip('|').split('|') for line in buffer]
         rows_data = [[c.strip() for c in r] for r in rows_data]
         if not rows_data: return
-        
         headers = None
         body_start = 0
         if len(rows_data) > 1 and all(set(c) <= set('-: ') for c in rows_data[1]):
             headers = rows_data[0]
             body_start = 2
-        
         body_rows = rows_data[body_start:]
         all_rows = ([headers] if headers else []) + body_rows
         if not all_rows: return
-        
         max_cols = max(len(r) for r in all_rows)
         table = container.add_table(rows=len(all_rows), cols=max_cols)
         table.style = 'Table Grid'
-        
         curr_idx = 0
         if headers:
             for j, txt in enumerate(headers):
@@ -237,7 +239,6 @@ def render_markdown(container, text):
                     p = table.rows[curr_idx].cells[j].paragraphs[0]
                     p.add_run(txt).bold = True
             curr_idx += 1
-            
         for row in body_rows:
             for j, txt in enumerate(row):
                 if j < len(table.rows[curr_idx].cells):
@@ -254,9 +255,7 @@ def render_markdown(container, text):
             if table_buffer:
                 _flush_table(table_buffer)
                 table_buffer = []
-
         if not stripped: continue
-        
         if stripped.startswith("```"):
             in_code_block = not in_code_block
             continue
@@ -268,7 +267,6 @@ def render_markdown(container, text):
             run.font.size = Pt(9.5)
             run.font.color.rgb = RGBColor(80, 80, 80)
             continue
-        
         if stripped.startswith("### ") or stripped.startswith("## "):
             p = container.add_paragraph()
             p.paragraph_format.space_before = Pt(6)
@@ -277,7 +275,6 @@ def render_markdown(container, text):
             run.font.size = Pt(13)
             run.font.color.rgb = RGBColor(46, 116, 181)
             continue
-
         p = None
         content = stripped
         if stripped.startswith("- ") or stripped.startswith("* "):
@@ -288,10 +285,8 @@ def render_markdown(container, text):
             try: p = container.add_paragraph(style='List Number')
             except: p = container.add_paragraph(style='List Paragraph')
             content = re.sub(r'^\d+\.\s', '', stripped)
-            
         if p is None: p = container.add_paragraph()
         _render_inline(p, content)
-
     if table_buffer: _flush_table(table_buffer)
 
 # ==========================================
@@ -314,17 +309,23 @@ def generate_word_report(json_path, output_path, ai_insights_path=None, company_
             print("✅ 成功載入 AI 分析數據！")
         except: pass
 
-    # [New] 建立 Fuzzy Lookup Map 
-    # 用來解決 AI 可能輸出中文 Key 或大小寫不一致的問題
+    # Fuzzy Lookup Map
     ai_solutions_map = {}
     if 'solutions' in ai_data:
-        for k, v in ai_data['solutions'].items():
-            # 1. 原始 Key
-            ai_solutions_map[k] = v
-            # 2. 去除空白與轉小寫的 Key (Normalized)
-            norm_k = k.lower().strip()
-            if norm_k not in ai_solutions_map:
-                ai_solutions_map[norm_k] = v
+        raw_solutions = ai_data['solutions']
+        if isinstance(raw_solutions, list):
+            new_solutions = {}
+            for item in raw_solutions:
+                if isinstance(item, dict):
+                    for k, v in item.items():
+                        new_solutions[k] = v
+            raw_solutions = new_solutions
+        if isinstance(raw_solutions, dict):
+            for k, v in raw_solutions.items():
+                ai_solutions_map[k] = v
+                norm_k = k.lower().strip()
+                if norm_k not in ai_solutions_map:
+                    ai_solutions_map[norm_k] = v
 
     doc = Document()
     style = doc.styles['Normal']
@@ -332,21 +333,20 @@ def generate_word_report(json_path, output_path, ai_insights_path=None, company_
     style.font.size = Pt(11)
     style.element.rPr.rFonts.set(qn('w:eastAsia'), 'Microsoft JhengHei')
 
-    # --- 封面 ---
+    # 封面
     doc.add_heading(f'{company_name} - 弱點掃描報告', 0)
     base_dir = os.path.dirname(json_path)
     logo_path = os.path.join(base_dir, 'logo.png')
     if os.path.exists(logo_path):
         try: doc.add_picture(logo_path, width=Inches(2.0))
         except: pass
-    
     doc.add_paragraph(f"掃描工具: OWASP ZAP")
     doc.add_paragraph(f"產生日期: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     scan_target = data.get('site', [{}])[0].get('@name', 'Unknown Target')
     doc.add_paragraph(f"掃描目標: {scan_target}")
     doc.add_page_break()
 
-    # --- 摘要 ---
+    # 摘要
     doc.add_heading('1. 掃描結果摘要', level=1)
     sites = data.get('site', [])
     stats = {"High": 0, "Medium": 0, "Low": 0, "Informational": 0}
@@ -361,7 +361,10 @@ def generate_word_report(json_path, output_path, ai_insights_path=None, company_
 
     chart_path = os.path.join(base_dir, "risk_chart.png")
     if generate_risk_chart(stats, chart_path):
-        doc.add_picture(chart_path, width=Inches(4.0))
+        try:
+            doc.add_picture(chart_path, width=Inches(4.0))
+        except:
+            doc.add_paragraph("(圖表載入失敗)")
         if os.path.exists(chart_path): os.remove(chart_path)
 
     table = doc.add_table(rows=5, cols=2)
@@ -397,7 +400,7 @@ def generate_word_report(json_path, output_path, ai_insights_path=None, company_
         doc.add_paragraph("")
     doc.add_page_break()
 
-    # --- 詳情 ---
+    # 詳情
     doc.add_heading('2. 弱點詳情分析', level=1)
 
     for site in sites:
@@ -407,19 +410,14 @@ def generate_word_report(json_path, output_path, ai_insights_path=None, company_
             risk_eng = alert.get('riskdesc', 'Info').split(' ')[0]
             desc = clean_html(alert.get('desc', ''))
             
-            tw_name = translate_title(eng_name) # 中文翻譯名稱
+            tw_name = translate_title(eng_name)
             tw_risk = RISK_MAPPING.get(risk_eng, risk_eng)
 
-            # [Key Fix] 智慧型查找：先找英文 Key，再找中文 Key，再找模糊 Key
             ai_content = None
-            
-            # 1. 嘗試英文原名 (e.g., "Absence of Anti-CSRF Tokens")
             if eng_name in ai_solutions_map:
                 ai_content = ai_solutions_map[eng_name]
-            # 2. 嘗試中文翻譯名 (e.g., "缺乏 Anti-CSRF Token")
             elif tw_name and tw_name in ai_solutions_map:
                 ai_content = ai_solutions_map[tw_name]
-            # 3. 嘗試模糊比對 (Lowercase + Strip)
             elif eng_name.lower().strip() in ai_solutions_map:
                 ai_content = ai_solutions_map[eng_name.lower().strip()]
             
@@ -439,13 +437,12 @@ def generate_word_report(json_path, output_path, ai_insights_path=None, company_
                 if is_md:
                     render_markdown(cell, content)
                 else:
-                    cell.text = content
+                    cell.text = str(content)
                     if color:
                         run = cell.paragraphs[0].runs[0]
                         run.bold = True
                         run.font.color.rgb = color
 
-            # 1. 基本資訊
             add_row("弱點原名", eng_name)
             
             risk_color = None
@@ -453,16 +450,9 @@ def generate_word_report(json_path, output_path, ai_insights_path=None, company_
             elif "Medium" in risk_eng: risk_color = RGBColor(255, 165, 0)
             add_row("風險等級", tw_risk, color=risk_color)
             
-            # 弱點描述 (自動翻譯)
-            if parsed_ai and parsed_ai.get('explanation'):
-                 # 這裡為了對齊格式，依然翻譯原描述，因為 AI 解釋會放在下方
-                zh_desc = auto_translate(desc)
-                add_row("弱點描述", zh_desc)
-            else:
-                zh_desc = auto_translate(desc)
-                add_row("弱點描述", zh_desc)
+            zh_desc = auto_translate(desc)
+            add_row("弱點描述", zh_desc)
 
-            # 2. 修復建議區塊 (AI vs ZAP)
             if parsed_ai:
                 if parsed_ai.get('explanation'):
                     add_row("弱點分析 (AI)", parsed_ai['explanation'], is_md=True)
@@ -470,25 +460,29 @@ def generate_word_report(json_path, output_path, ai_insights_path=None, company_
                 sol_content = parsed_ai.get('solution') or ai_content
                 add_row("修復建議 (AI)", sol_content, is_md=True)
                 
-                if parsed_ai.get('reference'):
-                    add_row("技術參考 (AI)", parsed_ai['reference'], is_md=True)
-                
+                ref_content = parsed_ai.get('reference')
                 source_label = "生成式 AI 建議"
             else:
-                # ZAP 標準建議 (翻譯)
                 solution_text = clean_html(alert.get('solution', ''))
                 zh_solution = auto_translate(solution_text)
                 add_row("修復建議", zh_solution)
+                ref_content = clean_html(alert.get('reference', ''))
                 source_label = "ZAP 標準建議"
 
-            # 3. 來源標示
             row = det_table.add_row()
             row.cells[0].text = "建議來源"
-            p = row.cells[1].paragraphs[0]
+            cell = row.cells[1]
+            p = cell.paragraphs[0]
             run = p.add_run(source_label)
             if parsed_ai:
                 run.bold = True
                 run.font.color.rgb = RGBColor(0, 112, 192)
+            
+            if ref_content:
+                cell.add_paragraph("") 
+                p_ref = cell.add_paragraph()
+                p_ref.add_run("參考資料:").bold = True
+                render_markdown(cell, ref_content)
 
             doc.add_paragraph("")
 

@@ -4,6 +4,9 @@ FROM python:3.9-slim
 # 設定容器內的工作目錄
 WORKDIR /app
 
+# [Fix] 安裝中文字型 (Noto Sans CJK) 解決 Matplotlib 亂碼問題
+RUN apt-get update && apt-get install -y fonts-noto-cjk && rm -rf /var/lib/apt/lists/*
+
 # 複製 requirements.txt 並安裝依賴
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt

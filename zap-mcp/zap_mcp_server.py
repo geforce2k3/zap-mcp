@@ -8,11 +8,12 @@ import traceback
 import shutil
 import re
 import logging
-import requests # [New] 用於執行登入
+import requests 
+import xml.etree.ElementTree as ET
 from urllib.parse import urlparse
 from mcp.server.fastmcp import FastMCP
 
-# [Short-term Goal 1] 設定結構化日誌
+# 設定結構化日誌
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s',
@@ -40,49 +41,87 @@ INTERNAL_DATA_DIR = "/app/data"
 OUTPUT_DIR = "/output"
 SCAN_CONTAINER_NAME = "zap-scanner-job"
 
-# [Short-term Goal 2] 安全驗證函式
+# 安全驗證函式
 def is_safe_url(url: str) -> bool:
-    """驗證 URL 安全性，防止 Shell Injection"""
     if not url: return False
-    
-    # 雙重檢查：禁止常見 Shell Injection 字元
-    # 雖然 subprocess.run 列表形式能防護部分，但嚴格過濾是資安最佳實踐
     if any(char in url for char in [';', '|', '`', '$', '(', ')', '<', '>', '\\', '{', '}']):
         return False
-        
-    # 正則驗證：只允許標準 http/https 格式
     regex = re.compile(
-        r'^(https?://)'  # 必須是 http:// 或 https://
-        r'(?:(?:[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?\.)+[A-Z]{2,6}\.?|'  # domain name
-        r'localhost|'  # localhost
-        r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})'  # ip
-        r'(?::\d+)?'  # port
-        r'(?:/?|[/?][a-zA-Z0-9-._~:/?#\[\]@!$&\'()*+,;=%]*)$', # path
+        r'^(https?://)'  
+        r'(?:(?:[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?\.)+[A-Z]{2,6}\.?|'  
+        r'localhost|' 
+        r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})' 
+        r'(?::\d+)?'  
+        r'(?:/?|[/?][a-zA-Z0-9-._~:/?#\[\]@!$&\'()*+,;=%]*)$', 
         re.IGNORECASE
     )
     return re.match(regex, url) is not None
 
 def parse_zap_progress(container_name):
-    """從 Docker Log 解析 ZAP 目前的掃描階段"""
     try:
         cmd = ["docker", "logs", "--tail", "20", container_name]
         result = subprocess.run(cmd, capture_output=True, text=True)
         logs = result.stdout + result.stderr
         
-        if "Active Scan" in logs:
-            return "正在進行主動攻擊掃描 (Active Scanning)..."
-        elif "Spider" in logs or "spider" in logs:
-            match = re.search(r'URLs found: (\d+)', logs)
-            count = match.group(1) if match else "?"
-            return f"正在進行爬蟲探索 (Spidering) - 已發現 {count} 個連結..."
-        elif "Passive Scan" in logs:
-             return "正在進行被動掃描 (Passive Scanning)..."
-        else:
-            return "初始化或處理中..."
-    except Exception:
-        return "無法取得進度細節"
+        if "Active Scan" in logs: return "正在進行主動攻擊掃描 (Active Scanning)..."
+        elif "Spider" in logs: return "正在進行爬蟲探索 (Spidering)..."
+        elif "Passive Scan" in logs: return "正在進行被動掃描 (Passive Scanning)..."
+        else: return "初始化或處理中..."
+    except: return "無法取得進度"
+
 # ==========================================
-# [New] 新增工具：自動登入並取得 Cookie
+# 工具 1: Nmap 偵察
+# ==========================================
+@mcp.tool()
+def run_nmap_recon(target_host: str, ports: str = "top-1000") -> str:
+    """【流程第一步】執行 Nmap 埠口掃描，自動識別 Web 服務。"""
+    if any(char in target_host for char in [';', '|', '`', '$']):
+        return "❌ 錯誤：目標主機包含非法字元。"
+
+    logger.info(f"啟動 Nmap 偵察: Target={target_host}, Ports={ports}")
+    nmap_xml_output = os.path.join(INTERNAL_DATA_DIR, "nmap_result.xml")
+    
+    nmap_cmd = ["nmap", "-sV", "--open", "-oX", nmap_xml_output, target_host]
+    if ports != "top-1000":
+        if ports == "p-": nmap_cmd.append("-p-")
+        else: nmap_cmd.extend(["-p", ports])
+
+    try:
+        subprocess.run(nmap_cmd, check=True, capture_output=True, text=True)
+        tree = ET.parse(nmap_xml_output)
+        root = tree.getroot()
+        
+        discovered_urls = []
+        raw_services = []
+
+        for host in root.findall('host'):
+            ports_elem = host.find('ports')
+            if ports_elem:
+                for port in ports_elem.findall('port'):
+                    port_id = port.get('portid')
+                    service = port.find('service')
+                    service_name = service.get('name') if service is not None else "unknown"
+                    raw_services.append(f"Port {port_id}: {service_name}")
+
+                    protocol = "http"
+                    if "https" in service_name or "ssl" in service_name: protocol = "https"
+                    elif service_name not in ["http", "http-alt", "http-proxy", "soap"]: continue 
+
+                    url = f"{protocol}://{target_host}:{port_id}"
+                    if (protocol == "http" and port_id == "80") or (protocol == "https" and port_id == "443"):
+                        url = f"{protocol}://{target_host}"
+                    discovered_urls.append(url)
+
+        if not discovered_urls:
+            return f"🔍 Nmap 完成。開放端口: {', '.join(raw_services)}\n⚠️ 未發現明顯 Web 服務。"
+
+        return f"✅ **偵察完成！發現 Web 服務**：\n{chr(10).join(['- ' + url for url in discovered_urls])}"
+
+    except Exception as e:
+        return f"❌ Nmap 執行失敗: {str(e)}"
+
+# ==========================================
+# 工具 2: 自動登入
 # ==========================================
 @mcp.tool()
 def perform_login_and_get_cookie(
@@ -93,72 +132,31 @@ def perform_login_and_get_cookie(
     password_field: str = "password",
     submit_url: str = None
 ) -> str:
-    """
-    【輔助工具】針對「使用者帳號密碼」登入的網站，執行登入並取得 Cookie 字串。
-    
-    參數:
-    - login_url: 登入頁面網址 (例如 http://example.com/login)
-    - username: 帳號
-    - password: 密碼
-    - username_field: 表單中帳號欄位的 name (預設 "username" 或 "email")
-    - password_field: 表單中密碼欄位的 name (預設 "password")
-    - submit_url: (選填) 如果表單提交到不同網址，請填寫。若未填則預設為 login_url。
-    
-    回傳:
-    - 成功登入後的 Cookie 字串 (格式: "key=value; key2=value2")，可直接用於 start_scan_job。
-    """
+    """【輔助工具】執行自動登入並取得 Cookie。"""
     logger.info(f"執行自動登入: {login_url} User={username}")
-    
     try:
         session = requests.Session()
-        # 1. 先 GET 一次頁面，取得 CSRF Token (若有) 或初始化 Cookie
-        # 這裡做個簡單的 User-Agent 偽裝
-        session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0'
-        })
+        session.headers.update({'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) ZAP-MCP/1.0'})
         
-        response = session.get(login_url, timeout=10)
-        if response.status_code != 200:
-            return f"無法存取登入頁面 (Status: {response.status_code})"
+        resp = session.get(login_url, timeout=10)
+        if resp.status_code != 200: return f"無法存取頁面 (Status: {resp.status_code})"
 
-        # 2. 準備登入資料
-        payload = {
-            username_field: username,
-            password_field: password
-        }
+        payload = {username_field: username, password_field: password}
+        target = submit_url if submit_url else login_url
         
-        # TODO: 若網站有 CSRF Token，這裡需要 BeautifulSoup 解析並放入 payload
-        # 簡單版暫不處理複雜 CSRF，適用於一般測試站或 API
-        
-        target_url = submit_url if submit_url else login_url
-        
-        # 3. 送出 POST 登入
-        post_response = session.post(target_url, data=payload, timeout=10)
-        
-        if post_response.status_code not in [200, 302, 303]:
-             return f"登入請求回應異常 (Status: {post_response.status_code})，可能登入失敗。"
+        post_resp = session.post(target, data=payload, timeout=10)
+        if post_resp.status_code not in [200, 302, 303]: return f"登入異常 (Status: {post_resp.status_code})"
 
-        # 4. 提取 Cookie
         cookies = session.cookies.get_dict()
-        if not cookies:
-            return "登入後未發現任何 Cookie，請確認帳號密碼或欄位名稱是否正確。"
+        if not cookies: return "登入後未發現 Cookie。"
             
-        # 格式化為 Header 字串
-        cookie_string = "; ".join([f"{k}={v}" for k, v in cookies.items()])
-        
-        return f"""
-**登入成功！** (或已取得 Cookie)
-
-**Cookie 字串**: 
-`{cookie_string}`
-
-您可以接著呼叫 `start_scan_job`，將此字串填入 `auth_value`，並設定 `auth_header='Cookie'`。
-"""
+        cookie_str = "; ".join([f"{k}={v}" for k, v in cookies.items()])
+        return f"**登入成功！** Cookie: `{cookie_str}`"
     except Exception as e:
-        return f"登入過程發生錯誤: {str(e)}"
+        return f"登入錯誤: {str(e)}"
 
 # ==========================================
-# [Enhanced] 掃描工具 (支援 Auth)
+# 工具 3: 啟動掃描 (修正 NameError)
 # ==========================================
 @mcp.tool()
 def start_scan_job(
@@ -168,30 +166,17 @@ def start_scan_job(
     auth_header: str = None,  
     auth_value: str = None    
 ) -> str:
-    """
-    【第一步】啟動 ZAP 弱點掃描任務 (支援身分驗證)。
-    
-    參數:
-    - target_url: 目標網址
-    - scan_type: 'baseline' / 'full'
-    - aggressive: True 開啟積極模式
-    - auth_header: (選填) 驗證標頭名稱。若使用 Bearer Token 請填 'Authorization'；若使用 Cookie 請填 'Cookie'。
-    - auth_value: (選填) 驗證內容。例如 'Bearer xyz...' 或 'session_id=abc...'。
-    """
-    if not is_safe_url(target_url):
-        return "錯誤：網址格式不合法。"
+    """【流程第二步】啟動 ZAP 弱點掃描任務。"""
+    if not is_safe_url(target_url): return "錯誤：網址格式不合法。"
 
-    logger.info(f"接收掃描請求: URL={target_url}, Type={scan_type}, Auth={bool(auth_value)}")
-
-    json_filename = "ZAP-Report.json"
-    script_name = "zap-full-scan.py" if scan_type == "full" else "zap-baseline.py"
+    logger.info(f"啟動掃描: URL={target_url}, Type={scan_type}, Auth={bool(auth_value)}")
     
     subprocess.run(["docker", "rm", "-f", SCAN_CONTAINER_NAME], capture_output=True)
 
     zap_configs = []
     mode_desc = []
 
-    # [Auth] 注入驗證標頭 (使用 ZAP Replacer)
+    # [Auth]
     if auth_header and auth_value:
         zap_configs.extend([
             "-config", "replacer.full_list(0).description=MCP_Auth",
@@ -199,19 +184,20 @@ def start_scan_job(
             "-config", "replacer.full_list(0).matchtype=REQ_HEADER",
             "-config", f"replacer.full_list(0).matchstr={auth_header}",
             "-config", "replacer.full_list(0).regex=false",
-            "-config", f"replacer.full_list(0).replacement={auth_value}" # ZAP 會將此值填入 Header
+            "-config", f"replacer.full_list(0).replacement={auth_value}"
         ])
         mode_desc.append("🔐 Authenticated")
 
     if aggressive:
         mode_desc.append("🕷️ Aggressive")
 
+    script_name = "zap-full-scan.py" if scan_type == "full" else "zap-baseline.py"
     zap_cmd = [
         "docker", "run", "-d", "--name", SCAN_CONTAINER_NAME, "-u", "0",
         "--dns", "8.8.8.8",
         "-v", f"{SHARED_VOLUME_NAME}:/zap/wrk:rw", 
         "-t", "zaproxy/zap-stable",
-        script_name, "-t", target_url, "-J", json_filename, "-I"
+        script_name, "-t", target_url, "-J", "ZAP-Report.json", "-I"
     ]
     
     if aggressive:
@@ -224,227 +210,172 @@ def start_scan_job(
     if zap_configs:
         zap_cmd.extend(["-z", " ".join(zap_configs)])
 
-    aggressive_text = " / ".join(mode_desc) if mode_desc else "Standard"
+    # [Fix] 確保變數一定有值，且不會因為縮排問題被跳過
+    aggressive_text = "標準模式 (Standard)" 
+    if mode_desc:
+        aggressive_text = " / ".join(mode_desc)
 
     try:
         result = subprocess.run(zap_cmd, check=False, capture_output=True, text=True)
         if result.returncode != 0: return f"啟動失敗: {result.stderr}"
         
         return f"""
-**掃描任務已啟動！**
+🚀 **掃描任務已啟動！**
 * **目標**: {target_url}
 * **模式**: {aggressive_text}
-* **驗證**: {'已啟用 (' + auth_header + ')' if auth_header else '無'}
+* **驗證**: {'已啟用' if auth_header else '無'}
+
+⚠️ **重要**: 掃描在背景執行，離開對話不會中斷。請稍後使用 `check_status` 查詢。
 """
     except Exception as e:
         return f"系統錯誤: {str(e)}"
+
+# ==========================================
+# 工具 4: 檢查狀態
+# ==========================================
 @mcp.tool()
 def check_status_and_generate_report() -> str:
-    """
-    【第二步】檢查掃描進度。若完成則產生報告，若未完成則回報詳細階段。
-    """
+    """【流程第三步】檢查進度。若掃描中會提示等待；完成後自動產生 Word 報告。"""
     check_cmd = ["docker", "ps", "-q", "-f", f"name={SCAN_CONTAINER_NAME}"]
     is_running = subprocess.run(check_cmd, capture_output=True, text=True).stdout.strip()
     
     if is_running:
-        progress_desc = parse_zap_progress(SCAN_CONTAINER_NAME)
-        return f"⏳ **掃描進行中**\n狀態: {progress_desc}"
+        progress = parse_zap_progress(SCAN_CONTAINER_NAME)
+        return f"""
+⏳ **掃描進行中** (Status: Running)
+目前階段: {progress}
+
+**SYSTEM NOTE:** 請 **等待 30 秒** 後再檢查狀態，不要立即重試。
+"""
     
-    logger.info("掃描容器已停止，開始執行報告轉換...")
-    
-    reporter_cmd = [
-        "docker", "run", "--rm",
-        "-v", f"{SHARED_VOLUME_NAME}:/app/data",
-        "zap-reporter:latest"
-    ]
+    logger.info("掃描結束，轉換報告中...")
+    reporter_cmd = ["docker", "run", "--rm", "-v", f"{SHARED_VOLUME_NAME}:/app/data", "zap-reporter:latest"]
 
     try:
-        proc = subprocess.run(reporter_cmd, check=True, capture_output=True, text=True)
-        logger.info(f"Reporter Output: {proc.stdout}")
+        subprocess.run(reporter_cmd, check=True, capture_output=True, text=True)
         
-        # 讀取 JSON 摘要
-        read_json_cmd = [
-            "docker", "run", "--rm",
-            "-v", f"{SHARED_VOLUME_NAME}:/data",
-            "alpine", "cat", "/data/ZAP-Report.json"
-        ]
-        json_proc = subprocess.run(read_json_cmd, capture_output=True, text=True)
+        # 讀取摘要
+        read_json = ["docker", "run", "--rm", "-v", f"{SHARED_VOLUME_NAME}:/data", "alpine", "cat", "/data/ZAP-Report.json"]
+        json_proc = subprocess.run(read_json, capture_output=True, text=True)
         
-        if json_proc.returncode != 0:
-            logger.warning("找不到 ZAP-Report.json，掃描可能失敗")
-            return "錯誤：找不到 ZAP-Report.json。這通常代表 ZAP 掃描異常終止。"
+        if json_proc.returncode != 0: return "❌ 錯誤：找不到報告檔案，掃描可能失敗。"
 
         try:
             data = json.loads(json_proc.stdout)
             high = sum(1 for s in data.get('site',[]) for a in s.get('alerts',[]) if a.get('riskcode') == '3')
             med = sum(1 for s in data.get('site',[]) for a in s.get('alerts',[]) if a.get('riskcode') == '2')
-            summary_text = f"高風險: {high} | 中風險: {med}"
-        except json.JSONDecodeError:
-            return "錯誤：ZAP 輸出的 JSON 格式損毀，無法讀取。"
+            summary = f"🔴 高風險: {high} | 🟠 中風險: {med}"
+        except: summary = "無法讀取統計"
 
-        return f"""
- **任務全部完成！**
-
-{summary_text}
-
- **報告已生成**
-請執行 `retrieve_report` 工具將檔案取出至桌面。
-"""
-            
+        return f"✅ **掃描與報告生成完成！**\n{summary}\n請接著使用 `get_report_for_analysis` 進行分析。"
     except subprocess.CalledProcessError as e:
-        error_msg = e.stderr if e.stderr else e.stdout
-        logger.error(f"報告生成失敗: {error_msg}")
-        return f" 報告生成失敗。\n程式回傳錯誤: {error_msg}"
+        return f"⚠️ 報告生成失敗: {e.stderr}"
 
+# ==========================================
+# 工具 5: 讀取精簡報告
+# ==========================================
 @mcp.tool()
 def get_report_for_analysis() -> str:
-    """
-    【第四步】讀取 ZAP 掃描報告 (僅擷取高/中風險)，以供 AI 分析。
-    """
+    """【流程第四步】讀取關鍵弱點 (High/Medium) 供 AI 分析。(字數限制 2000)"""
     try:
-        read_cmd = [
-            "docker", "run", "--rm",
-            "-v", f"{SHARED_VOLUME_NAME}:/data",
-            "alpine", "cat", "/data/ZAP-Report.json"
-        ]
-        
+        read_cmd = ["docker", "run", "--rm", "-v", f"{SHARED_VOLUME_NAME}:/data", "alpine", "cat", "/data/ZAP-Report.json"]
         proc = subprocess.run(read_cmd, capture_output=True, text=True)
-        
-        if proc.returncode != 0:
-            return " 無法讀取報告檔案。請確認掃描是否已完成。"
+        if proc.returncode != 0: return "無法讀取報告。"
             
         data = json.loads(proc.stdout)
         sites = data.get('site', [])
         
-        # [Short-term Goal 3] AI 內容優化
-        report_context = ["# ZAP 弱點掃描重點分析報告 (High/Medium Risk Only)\n"]
-        report_context.append(f"- 掃描時間: {data.get('@generated', 'Unknown')}")
-        
+        report_context = ["# ZAP 關鍵風險摘要 (High/Medium Only)\n"]
         critical_count = 0
         
         for site in sites:
             target_host = site.get('@name', 'Unknown')
             alerts = site.get('alerts', [])
-            
-            # 過濾邏輯：只看 High(3) 和 Medium(2)
+            # 只取 High/Medium
             critical_alerts = [a for a in alerts if a.get('riskcode') in ['2', '3']]
             
-            if not critical_alerts:
-                continue
+            if not critical_alerts: continue
                 
-            report_context.append(f"\n## 🔍 {target_host} 關鍵弱點 ({len(critical_alerts)} 個)")
-            
+            report_context.append(f"\n## 🎯 {target_host}")
             for i, alert in enumerate(critical_alerts, 1):
                 name = alert.get('alert', 'Unknown')
-                risk = alert.get('riskdesc', 'Info').split(' ')[0] # 只取 High/Medium 單字
-
-                # 字串截斷處理
+                risk = alert.get('riskdesc', 'Info').split(' ')[0]
+                
                 desc = alert.get('desc', '').replace('<p>', '').replace('</p>', '\n')
-                desc = (desc[:350] + '...') if len(desc) > 350 else desc
+                if len(desc) > 2000: desc = desc[:2000] + "...(truncated)"
                 
-                solution = alert.get('solution', '').replace('<p>', '').replace('</p>', '\n')
-                solution = (solution[:350] + '...') if len(solution) > 350 else solution
+                sol = alert.get('solution', '').replace('<p>', '').replace('</p>', '\n')
+                if len(sol) > 2000: sol = sol[:2000] + "...(truncated)"
                 
-                reference = alert.get('reference', '').replace('<p>', '').replace('</p>', '\n')
-
-                report_context.append(f"\n### {i}. {name}")
-                report_context.append(f"**風險等級**: {risk}")
-                report_context.append(f"**簡述**: \n{desc}")
-                report_context.append(f"**建議**: \n{solution}")
-                
-                if reference:
-                    refs = [line for line in reference.split('\n') if line.strip()][:3] # 只取前3個參考資料
-                    if refs:
-                        report_context.append("**參考**: " + ", ".join(refs))
-                
+                report_context.append(f"- [{risk}] {name}")
+                report_context.append(f"  - 📝 狀況: {desc}")
+                report_context.append(f"  - 🛠️ 建議: {sol}")
                 critical_count += 1
 
         final_report = "\n".join(report_context)
-
-        # 寫入檔案
+        
         try:
-            output_path = os.path.join(OUTPUT_DIR, "zap_analysis.md")
-            with open(output_path, "w", encoding="utf-8") as f:
+            with open(os.path.join(OUTPUT_DIR, "zap_analysis.md"), "w", encoding="utf-8") as f:
                 f.write(final_report)
-            save_msg = f"\n\n(重點分析報告已同步儲存至: zap_analysis.md)"
-        except Exception as e:
-            logger.error(f"寫入 Markdown 失敗: {e}")
-            save_msg = f"\n\n(警告: 寫入檔案失敗)"
+        except: pass
 
         if critical_count == 0:
-            return "本次掃描未發現高/中風險弱點。" + save_msg
+            return "✅ 恭喜！未發現高/中風險弱點 (低風險已忽略)。"
             
-        return final_report + save_msg
+        return final_report + "\n\n(已顯示 High/Medium 風險)"
 
     except Exception as e:
-        logger.exception("get_report_for_analysis 發生錯誤")
-        return f"系統錯誤: {str(e)}"
+        return f"分析錯誤: {str(e)}"
 
-@mcp.tool()
-def retrieve_report() -> str:
-    """【第三步】將報告匯出到主機指定的資料夾。"""
-    try:
-        if not os.path.exists(INTERNAL_DATA_DIR):
-            return f" 資料目錄不存在: {INTERNAL_DATA_DIR}"
-            
-        docx_files = [f for f in os.listdir(INTERNAL_DATA_DIR) if f.endswith('.docx')]
-        
-        if not docx_files:
-            return " 找不到 .docx 報告。"
-
-        copied_files = []
-        for file in docx_files:
-            src = os.path.join(INTERNAL_DATA_DIR, file)
-            dst = os.path.join(OUTPUT_DIR, file)
-            shutil.copy2(src, dst)
-            copied_files.append(file)
-            
-        # 同步複製 JSON
-        json_src = os.path.join(INTERNAL_DATA_DIR, 'ZAP-Report.json')
-        if os.path.exists(json_src):
-            shutil.copy2(json_src, os.path.join(OUTPUT_DIR, 'ZAP-Report.json'))
-            copied_files.append('ZAP-Report.json')
-
-        return f" **檔案匯出成功！**\n檔案列表: {', '.join(copied_files)}"
-    except Exception as e:
-        logger.exception("匯出報告失敗")
-        return f" 匯出失敗: {str(e)}"
-
+# ==========================================
+# 工具 6: 注入 AI 建議
+# ==========================================
 @mcp.tool()
 def generate_report_with_ai_insights(executive_summary: str, solutions: str) -> str:
-    """【最終步】將 AI 建議注入並生成最終 Word 報告。"""
+    """【流程第五步】將 AI 建議注入並生成最終 Word 報告。"""
     try:
         try:
             solutions_dict = json.loads(solutions)
         except json.JSONDecodeError:
-            return " 錯誤：solutions 參數必須是有效的 JSON 字串。"
+            return "錯誤：solutions 參數必須是有效的 JSON 字串。"
 
         ai_data = {
             "executive_summary": executive_summary,
             "solutions": solutions_dict
         }
 
-        # 寫入 AI 數據
         local_ai_path = os.path.join(INTERNAL_DATA_DIR, "ai_insights.json")
         with open(local_ai_path, "w", encoding="utf-8") as f:
             json.dump(ai_data, f, ensure_ascii=False, indent=2)
 
-        logger.info("AI 數據已儲存，啟動 Reporter 生成最終報告...")
-        
-        reporter_cmd = [
-            "docker", "run", "--rm",
-            "-v", f"{SHARED_VOLUME_NAME}:/app/data",
-            "zap-reporter:latest"
-        ]
+        logger.info("啟動 Reporter 生成最終報告...")
+        reporter_cmd = ["docker", "run", "--rm", "-v", f"{SHARED_VOLUME_NAME}:/app/data", "zap-reporter:latest"]
         
         proc = subprocess.run(reporter_cmd, check=True, capture_output=True, text=True)
-        logger.info(f"Reporter Log: {proc.stdout}")
-
-        return f" **AI 智慧報告已生成！**\n已針對 {len(solutions_dict)} 個弱點注入建議。"
+        return f"✅ **AI 智慧報告已生成！**\n已注入 {len(solutions_dict)} 個建議。"
 
     except Exception as e:
-        logger.exception("注入 AI 建議時發生錯誤")
-        return f" 生成報告錯誤: {str(e)}"
+        return f"生成報告錯誤: {str(e)}"
+
+# ==========================================
+# 工具 7: 匯出檔案
+# ==========================================
+@mcp.tool()
+def retrieve_report() -> str:
+    """【流程第六步】匯出所有報告檔案。"""
+    try:
+        if not os.path.exists(INTERNAL_DATA_DIR): return "資料目錄不存在。"
+        
+        files = [f for f in os.listdir(INTERNAL_DATA_DIR) if f.endswith('.docx') or f.endswith('.json') or f.endswith('.xml')]
+        copied = []
+        
+        for f in files:
+            shutil.copy2(os.path.join(INTERNAL_DATA_DIR, f), os.path.join(OUTPUT_DIR, f))
+            copied.append(f)
+
+        return f"✅ **匯出成功！**\n檔案: {', '.join(copied)}"
+    except Exception as e:
+        return f"匯出失敗: {str(e)}"
 
 if __name__ == "__main__":
     mcp.run()
