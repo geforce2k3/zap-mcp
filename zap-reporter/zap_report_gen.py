@@ -11,35 +11,64 @@ import matplotlib.pyplot as plt
 from deep_translator import GoogleTranslator
 
 # ==========================================
-# 1. 翻譯與對照設定
+# 1. 翻譯與對照設定 (含持久化快取)
 # ==========================================
 
-# 初始化翻譯器 (目標語言：繁體中文)
 translator = GoogleTranslator(source='auto', target='zh-TW')
 
-# 翻譯快取，避免重複請求導致慢或被擋
+# 定義快取檔案路徑 (存放在 volume 中，重啟容器也不會消失)
+CACHE_FILE = "/app/data/translation_cache.json"
 TRANSLATION_CACHE = {}
 
+# 啟動時載入快取
+if os.path.exists(CACHE_FILE):
+    try:
+        with open(CACHE_FILE, 'r', encoding='utf-8') as f:
+            TRANSLATION_CACHE = json.load(f)
+    except:
+        print("讀取翻譯快取失敗，將建立新快取")
+
+def save_cache():
+    """將記憶體中的翻譯儲存到檔案"""
+    try:
+        with open(CACHE_FILE, 'w', encoding='utf-8') as f:
+            json.dump(TRANSLATION_CACHE, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"無法寫入翻譯快取: {e}")
+
 def auto_translate(text):
-    """
-    [New] 自動翻譯功能
-    使用 Google Translate 將英文描述轉為繁體中文
-    """
-    if not text or len(text) < 2:
-        return text
-        
-    # 如果已經翻譯過，直接回傳
-    if text in TRANSLATION_CACHE:
+    if not text or len(text) < 2: return text
+    
+    # 查表 (快取命中)
+    if text in TRANSLATION_CACHE: 
         return TRANSLATION_CACHE[text]
     
     try:
-        # 限制長度以免翻譯失敗，通常描述不會超過 4500 字元
-        translate_text = text[:4500]
-        result = translator.translate(translate_text)
+        # 呼叫 Google Translate
+        result = translator.translate(text[:4500])
+        # 寫入快取
         TRANSLATION_CACHE[text] = result
         return result
     except Exception as e:
-        print(f"⚠️ 翻譯失敗 (使用原文): {e}")
+        print(f"翻譯失敗: {e}")
+        return text
+
+# ==========================================
+# 1. 翻譯與對照設定
+# ==========================================
+
+translator = GoogleTranslator(source='auto', target='zh-TW')
+TRANSLATION_CACHE = {}
+
+def auto_translate(text):
+    if not text or len(text) < 2: return text
+    if text in TRANSLATION_CACHE: return TRANSLATION_CACHE[text]
+    try:
+        result = translator.translate(text[:4500])
+        TRANSLATION_CACHE[text] = result
+        return result
+    except Exception as e:
+        print(f"⚠️ 翻譯失敗: {e}")
         return text
 
 RISK_MAPPING = {
@@ -92,7 +121,6 @@ def translate_title(english_title):
     return TERM_MAPPING.get(english_title, english_title)
 
 def set_table_header_style(cell):
-    """設定表格標題的底色與粗體"""
     paragraphs = cell.paragraphs
     for p in paragraphs:
         for run in p.runs:
@@ -100,7 +128,6 @@ def set_table_header_style(cell):
             run.font.size = Pt(12)
 
 def generate_risk_chart(stats, output_img_path):
-    """繪製風險分佈圓餅圖"""
     labels = []
     sizes = []
     colors = []
@@ -128,7 +155,6 @@ def generate_risk_chart(stats, output_img_path):
     return True
 
 def parse_ai_response(text):
-    """智慧解析器：將 AI 的 Markdown 回應拆解為結構化區塊"""
     sections = {'explanation': '', 'solution': '', 'reference': ''}
     current_section = None
     buffer = []
@@ -163,14 +189,8 @@ def parse_ai_response(text):
         return {'solution': text}
     return sections
 
-# [Enhanced] 超級版 Markdown 渲染器 (含表格支援)
 def render_markdown(container, text):
-    """
-    將 Markdown 文字渲染進 docx 的容器中。
-    支援: 表格(|), 程式碼(```), 標題(###), 列表(-/1.), 行內格式(**, `)
-    """
     if not text: return
-
     lines = text.split('\n')
     in_code_block = False
     table_buffer = [] 
@@ -294,6 +314,18 @@ def generate_word_report(json_path, output_path, ai_insights_path=None, company_
             print("✅ 成功載入 AI 分析數據！")
         except: pass
 
+    # [New] 建立 Fuzzy Lookup Map 
+    # 用來解決 AI 可能輸出中文 Key 或大小寫不一致的問題
+    ai_solutions_map = {}
+    if 'solutions' in ai_data:
+        for k, v in ai_data['solutions'].items():
+            # 1. 原始 Key
+            ai_solutions_map[k] = v
+            # 2. 去除空白與轉小寫的 Key (Normalized)
+            norm_k = k.lower().strip()
+            if norm_k not in ai_solutions_map:
+                ai_solutions_map[norm_k] = v
+
     doc = Document()
     style = doc.styles['Normal']
     style.font.name = 'Microsoft JhengHei'
@@ -375,16 +407,26 @@ def generate_word_report(json_path, output_path, ai_insights_path=None, company_
             risk_eng = alert.get('riskdesc', 'Info').split(' ')[0]
             desc = clean_html(alert.get('desc', ''))
             
-            # 檢查 AI 內容
-            ai_content = ai_data.get('solutions', {}).get(eng_name)
-            parsed_ai = parse_ai_response(ai_content) if ai_content else None
-            
-            tw_name = translate_title(eng_name)
+            tw_name = translate_title(eng_name) # 中文翻譯名稱
             tw_risk = RISK_MAPPING.get(risk_eng, risk_eng)
+
+            # [Key Fix] 智慧型查找：先找英文 Key，再找中文 Key，再找模糊 Key
+            ai_content = None
+            
+            # 1. 嘗試英文原名 (e.g., "Absence of Anti-CSRF Tokens")
+            if eng_name in ai_solutions_map:
+                ai_content = ai_solutions_map[eng_name]
+            # 2. 嘗試中文翻譯名 (e.g., "缺乏 Anti-CSRF Token")
+            elif tw_name and tw_name in ai_solutions_map:
+                ai_content = ai_solutions_map[tw_name]
+            # 3. 嘗試模糊比對 (Lowercase + Strip)
+            elif eng_name.lower().strip() in ai_solutions_map:
+                ai_content = ai_solutions_map[eng_name.lower().strip()]
+            
+            parsed_ai = parse_ai_response(ai_content) if ai_content else None
 
             doc.add_heading(tw_name, level=2)
             
-            # 動態建立表格
             det_table = doc.add_table(rows=0, cols=2)
             det_table.style = 'Table Grid'
             det_table.columns[0].width = Inches(1.5)
@@ -411,11 +453,9 @@ def generate_word_report(json_path, output_path, ai_insights_path=None, company_
             elif "Medium" in risk_eng: risk_color = RGBColor(255, 165, 0)
             add_row("風險等級", tw_risk, color=risk_color)
             
-            # [Translation Feature] 自動翻譯描述
-            # 若有 AI 解釋則用 AI，否則用翻譯過的原描述
+            # 弱點描述 (自動翻譯)
             if parsed_ai and parsed_ai.get('explanation'):
-                # 這裡不需要做什麼，下面會加 AI 分析欄位
-                # 但原本的 "弱點描述" 欄位還是要填，我們用翻譯過的 desc
+                 # 這裡為了對齊格式，依然翻譯原描述，因為 AI 解釋會放在下方
                 zh_desc = auto_translate(desc)
                 add_row("弱點描述", zh_desc)
             else:
@@ -435,7 +475,7 @@ def generate_word_report(json_path, output_path, ai_insights_path=None, company_
                 
                 source_label = "生成式 AI 建議"
             else:
-                # ZAP 標準建議 (也進行翻譯)
+                # ZAP 標準建議 (翻譯)
                 solution_text = clean_html(alert.get('solution', ''))
                 zh_solution = auto_translate(solution_text)
                 add_row("修復建議", zh_solution)
@@ -455,6 +495,7 @@ def generate_word_report(json_path, output_path, ai_insights_path=None, company_
     try:
         doc.save(output_path)
         print(f"報告生成完畢！已儲存至: {output_path}")
+        save_cache()
     except Exception as e:
         print(f"儲存失敗: {e}")
 

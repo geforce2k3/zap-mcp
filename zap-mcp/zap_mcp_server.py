@@ -336,26 +336,26 @@ def get_report_for_analysis() -> str:
             
             for i, alert in enumerate(critical_alerts, 1):
                 name = alert.get('alert', 'Unknown')
-                risk = alert.get('riskdesc', 'Info')
-                
+                risk = alert.get('riskdesc', 'Info').split(' ')[0] # 只取 High/Medium 單字
+
                 # 字串截斷處理
                 desc = alert.get('desc', '').replace('<p>', '').replace('</p>', '\n')
-                desc = (desc[:400] + '...') if len(desc) > 400 else desc
+                desc = (desc[:350] + '...') if len(desc) > 350 else desc
                 
                 solution = alert.get('solution', '').replace('<p>', '').replace('</p>', '\n')
-                solution = (solution[:400] + '...') if len(solution) > 400 else solution
+                solution = (solution[:350] + '...') if len(solution) > 350 else solution
                 
                 reference = alert.get('reference', '').replace('<p>', '').replace('</p>', '\n')
 
                 report_context.append(f"\n### {i}. {name}")
-                report_context.append(f"**🔴 風險等級**: {risk}")
-                report_context.append(f"**📝 簡述**: \n{desc}")
-                report_context.append(f"**🛠️ 建議**: \n{solution}")
+                report_context.append(f"**風險等級**: {risk}")
+                report_context.append(f"**簡述**: \n{desc}")
+                report_context.append(f"**建議**: \n{solution}")
                 
                 if reference:
                     refs = [line for line in reference.split('\n') if line.strip()][:3] # 只取前3個參考資料
                     if refs:
-                        report_context.append("**📚 參考**: " + ", ".join(refs))
+                        report_context.append("**參考**: " + ", ".join(refs))
                 
                 critical_count += 1
 
@@ -366,19 +366,19 @@ def get_report_for_analysis() -> str:
             output_path = os.path.join(OUTPUT_DIR, "zap_analysis.md")
             with open(output_path, "w", encoding="utf-8") as f:
                 f.write(final_report)
-            save_msg = f"\n\n( 重點分析報告已同步儲存至: zap_analysis.md)"
+            save_msg = f"\n\n(重點分析報告已同步儲存至: zap_analysis.md)"
         except Exception as e:
             logger.error(f"寫入 Markdown 失敗: {e}")
-            save_msg = f"\n\n( 警告: 寫入檔案失敗)"
+            save_msg = f"\n\n(警告: 寫入檔案失敗)"
 
         if critical_count == 0:
-            return " 恭喜！本次掃描未發現高/中風險弱點 (系統相對安全)。" + save_msg
+            return "本次掃描未發現高/中風險弱點。" + save_msg
             
         return final_report + save_msg
 
     except Exception as e:
         logger.exception("get_report_for_analysis 發生錯誤")
-        return f" 系統錯誤: {str(e)}"
+        return f"系統錯誤: {str(e)}"
 
 @mcp.tool()
 def retrieve_report() -> str:
