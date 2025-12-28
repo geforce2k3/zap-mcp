@@ -14,7 +14,7 @@ def main():
     # 檔案路徑
     json_file = os.path.join(DATA_DIR, ZAP_REPORT_FILENAME)
     ai_file = os.path.join(DATA_DIR, AI_INSIGHTS_FILENAME)
-    word_file = os.path.join(DATA_DIR, f'Scan_Report_{datetime.now().strftime("%Y%m%d")}.docx')
+    word_file = os.path.join(DATA_DIR, f'Scan_Report_{datetime.now().strftime("%y%m%d%H%M")}.docx')
 
     # 檢查報告檔案
     if not os.path.exists(json_file):

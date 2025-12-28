@@ -155,7 +155,7 @@ def run_nmap_recon(target_host: str, ports: str = "top-1000", force_rescan: bool
     # -oN: 輸出文字 Log (方便除錯)
     # -oX: 輸出 XML (給程式解析)
     nmap_cmd = [
-        "nmap", "-sV", "-sC",  "--script=vuln", "-O", "--open", "-T4",
+        "nmap", "-sV", "-sC", "--script=vulners", "-O", "--open", "-T4",
         "-oX", NMAP_XML_OUTPUT,
         "-oN", NMAP_LOG_FILE,
         target_host
