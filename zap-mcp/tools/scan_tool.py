@@ -24,10 +24,18 @@ def _build_auth_config(auth_header: str, auth_value: str) -> List[str]:
 def _build_aggressive_config(scan_type: str) -> List[str]:
     """建立積極掃描配置"""
     configs = []
+    configs.extend([
+        "-config", "scanner.threadPerHost=20", # 增加執行緒 (加速但高負載)
+        "-config", "spider.thread=10"
+    ])
     if scan_type == "full":
         configs.extend([
             "-config", "scanner.strength=HIGH",
-            "-config", "scanner.threadPerHost=10"
+            "-config", "scanner.threadPerHost=10",
+            "-config", "scanner.alertThreshold=LOW",
+            "-config", "rules.sqli.level=HIGH",  # 測試 SQL Injection
+            "-config", "rules.xss.level=HIGH",   # 測試 XSS
+            "-config", "rules.pathtraversal.level=HIGH" # 測試路徑遍歷
         ])
     return configs
 

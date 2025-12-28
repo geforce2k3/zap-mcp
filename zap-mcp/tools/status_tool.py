@@ -4,6 +4,8 @@
 from core.config import SCAN_CONTAINER_NAME
 from core.logging_config import logger
 from docker_utils import DockerClient, parse_zap_progress
+from tools.nmap_tool import is_nmap_running, _parse_nmap_results, NMAP_XML_OUTPUT
+import os
 
 REPORTER_CONTAINER_NAME = "zap-reporter-job"
 
@@ -12,6 +14,16 @@ def check_status_and_generate_report() -> str:
     【流程第三步】檢查進度與報告狀態。
     全異步設計，避免 MCP Timeout。
     """
+    status_report = []
+
+    # 1. 檢查 Nmap 狀態
+    if is_nmap_running():
+        status_report.append("**Nmap 偵察**: 進行中 (Running) 請等待 30 秒後再檢查。")
+    elif os.path.exists(NMAP_XML_OUTPUT):
+        # 簡單判斷：如果沒在跑，但有檔案，可能是剛跑完
+        # 這裡不自動回傳詳細結果以免洗版，只提示已完成
+        status_report.append("**Nmap 偵察**: 已完成 (Ready)")
+
     # 1. 檢查 ZAP 掃描器狀態
     if DockerClient.is_container_running(SCAN_CONTAINER_NAME):
         progress = parse_zap_progress(SCAN_CONTAINER_NAME)
