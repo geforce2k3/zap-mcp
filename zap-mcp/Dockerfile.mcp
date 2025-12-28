@@ -1,7 +1,7 @@
-# 使用 Python 基礎映像檔
+# ZAP MCP Server - 模組化版本
 FROM python:3.10-slim
 
-# 安裝 curl 以便下載 docker binary
+# 安裝系統依賴
 RUN apt-get update && apt-get install -y curl nmap && rm -rf /var/lib/apt/lists/* \
     && curl -fsSL https://download.docker.com/linux/static/stable/x86_64/docker-24.0.5.tgz -o docker.tgz \
     && tar xzvf docker.tgz \
@@ -10,11 +10,20 @@ RUN apt-get update && apt-get install -y curl nmap && rm -rf /var/lib/apt/lists/
 
 WORKDIR /app
 
-# [New] 安裝 requests (用於執行登入腳本) 與 beautifulsoup4 (用於解析 CSRF Token，若需要)
+# 安裝 Python 依賴
 RUN pip install --no-cache-dir mcp[cli] Fastmcp requests beautifulsoup4
 
-COPY zap_mcp_server.py .
+# 複製模組化程式碼
+COPY core/ ./core/
+COPY validators/ ./validators/
+COPY docker_utils/ ./docker_utils/
+COPY tools/ ./tools/
+COPY server.py .
+
 # 建立掛載點
 RUN mkdir -p /app/data /output
 
-CMD ["python", "zap_mcp_server.py"]
+# 設定 PYTHONPATH
+ENV PYTHONPATH=/app
+
+CMD ["python", "server.py"]

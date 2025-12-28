@@ -1,21 +1,26 @@
-# 使用輕量級的 Python 基礎映像檔
+# ZAP Reporter - 模組化版本
 FROM python:3.9-slim
 
-# 設定容器內的工作目錄
 WORKDIR /app
 
-# [Fix] 安裝中文字型 (Noto Sans CJK) 解決 Matplotlib 亂碼問題
+# 安裝中文字型 (Noto Sans CJK) 解決 Matplotlib 亂碼問題
 RUN apt-get update && apt-get install -y fonts-noto-cjk && rm -rf /var/lib/apt/lists/*
 
 # 複製 requirements.txt 並安裝依賴
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# 複製 Python 腳本進去
-COPY ./zap_report_gen.py .
+# 複製模組化程式碼
+COPY config/ ./config/
+COPY services/ ./services/
+COPY document/ ./document/
+COPY report_builder.py .
+COPY main.py .
 
 # 建立 data 資料夾 (作為掛載點)
-RUN mkdir /app/data
+RUN mkdir -p /app/data
 
-# 設定容器啟動時執行的指令
-CMD ["python", "zap_report_gen.py"]
+# 設定 PYTHONPATH
+ENV PYTHONPATH=/app
+
+CMD ["python", "main.py"]
