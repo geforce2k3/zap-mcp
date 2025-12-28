@@ -89,10 +89,18 @@ def export_report() -> str:
     """【流程第六步】匯出所有報告檔案。"""
     return retrieve_report()
 
+async def shutdown(signal, loop):
+    logger.info(f"收到信號 {signal.name}，正在關閉伺服器...")
+    loop.stop()
 
 # ==========================================
 # 主程式入口
 # ==========================================
 
 if __name__ == "__main__":
-    mcp.run()
+    try:
+        mcp.run()
+    except KeyboardInterrupt:
+        logger.info("使用者強制停止")
+    except Exception as e:
+        logger.error(f"伺服器異常退出: {e}")

@@ -112,9 +112,9 @@ mkdir -p ~/Documents/zap-output
 
 | 工具名稱 | 說明 |
 |---------|------|
-| `start_scan_job` | 【第一步】啟動 ZAP 弱點掃描任務 |
-| `check_status_and_generate_report` | 【第二步】檢查掃描進度，完成後產生報告 |
-| `retrieve_report` | 【第三步】將報告匯出到本機資料夾 |
+| `scan_job` | 【第一步】啟動 ZAP 弱點掃描任務 |
+| `get_analysis` | 【第二步】檢查掃描進度，完成後產生報告 |
+| `ai_insights` | 【第三步】將報告匯出到本機資料夾 |
 
 ### 操作流程
 
