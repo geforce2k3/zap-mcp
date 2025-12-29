@@ -50,12 +50,76 @@ def _add_stats_table(doc: Document, stats: Dict[str, int]):
     fill_row(3, "低風險 (Low)", stats['Low'], RGBColor(200, 200, 0))
     fill_row(4, "資訊 (Info)", stats['Informational'], RGBColor(0, 0, 255))
 
+def _add_nmap_summary(doc: Document, nmap_data: dict):
+    """[New] 添加基礎設施偵察摘要 (Nmap)"""
+    doc.add_heading('1.1 基礎設施偵察摘要 (Nmap)', level=2)
+    
+    if not nmap_data or not nmap_data.get("hosts"):
+        doc.add_paragraph("未發現 Nmap 掃描數據。")
+        return
+
+    # 1. 主機資訊表
+    doc.add_paragraph("主機與作業系統資訊：")
+    table = doc.add_table(rows=1, cols=3)
+    table.style = 'Table Grid'
+    hdr = table.rows[0].cells
+    hdr[0].text, hdr[1].text, hdr[2].text = 'IP 位址', '主機名稱', '作業系統 (OS)'
+    for cell in hdr: set_table_header_style(cell)
+
+    for host in nmap_data["hosts"]:
+        row = table.add_row().cells
+        row[0].text = host["ip"]
+        row[1].text = host["hostname"] or "N/A"
+        row[2].text = host["os"]
+
+    doc.add_paragraph("")
+
+    # 2. 開放端口與 CVE 表
+    doc.add_paragraph("開放端口與潛在漏洞 (CVE)：")
+    
+    # 建立表格
+    port_table = doc.add_table(rows=1, cols=3)
+    port_table.style = 'Table Grid'
+    phdr = port_table.rows[0].cells
+    phdr[0].text, phdr[1].text, phdr[2].text = '端口/協定', '服務版本', '潛在漏洞 / 腳本輸出'
+    for cell in phdr: set_table_header_style(cell)
+
+    has_vulns = False
+    for host in nmap_data["hosts"]:
+        for port in host["ports"]:
+            row = port_table.add_row().cells
+            row[0].text = f"{port['id']}/{port['protocol']}"
+            row[1].text = port['service']
+            
+            # 處理腳本輸出 (CVE)
+            script_text = ""
+            for script in port['scripts']:
+                # 簡單清理輸出，避免太長
+                output = script['output'].strip()
+                if len(output) > 500: output = output[:500] + "..."
+                script_text += f"[{script['id']}]\n{output}\n"
+                has_vulns = True
+            
+            if not script_text:
+                script_text = "無檢測到明顯漏洞"
+            
+            # 這裡可以使用 render_markdown 稍微美化輸出
+            row[2].text = script_text
+
+    if has_vulns:
+        p = doc.add_paragraph()
+        run = p.add_run("警告：偵測到潛在的 CVE 漏洞，請參閱上表腳本輸出。")
+        run.font.color.rgb = RGBColor(255, 0, 0)
+        run.bold = True
+
+    doc.add_paragraph("")
 
 def add_summary_section(
     doc: Document,
     data: dict,
     base_dir: str,
-    ai_data: Optional[dict] = None
+    ai_data: Optional[dict] = None,
+    nmap_data: Optional[dict] = None
 ):
     """
     生成報告摘要頁
@@ -68,6 +132,11 @@ def add_summary_section(
     """
     doc.add_heading('1. 掃描結果摘要', level=1)
 
+    if nmap_data:
+        _add_nmap_summary(doc, nmap_data)
+        doc.add_page_break() # 分頁
+        
+    doc.add_heading('1.2 應用程式弱點摘要 (ZAP)', level=2)
     # 統計風險
     stats = _count_risks(data)
     total_vulns = sum(stats.values())

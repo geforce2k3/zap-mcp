@@ -15,6 +15,7 @@ DEFAULT_COMPANY_NAME = os.getenv("REPORT_COMPANY_NAME", "Nextlink MSP")
 # 報告輸入輸出檔案
 ZAP_REPORT_FILENAME = "ZAP-Report.json"
 AI_INSIGHTS_FILENAME = "ai_insights.json"
+NMAP_REPORT_FILENAME = "nmap_result.xml"
 
 # 文字長度限制
 MAX_TEXT_LENGTH = 4500  # 翻譯 API 限制

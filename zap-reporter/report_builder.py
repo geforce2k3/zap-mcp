@@ -42,7 +42,8 @@ def generate_word_report(
     json_path: str,
     output_path: str,
     ai_insights_path: Optional[str] = None,
-    company_name: str = DEFAULT_COMPANY_NAME
+    company_name: str = DEFAULT_COMPANY_NAME,
+    nmap_data: Optional[dict] = None
 ) -> bool:
     """
     生成 Word 格式的弱點掃描報告
@@ -74,7 +75,7 @@ def generate_word_report(
 
     # 生成各區塊
     add_cover_page(doc, data, base_dir, company_name)
-    add_summary_section(doc, data, base_dir, ai_data)
+    add_summary_section(doc, data, base_dir, ai_data, nmap_data)
     add_details_section(doc, data, ai_data)
 
     # 儲存文檔

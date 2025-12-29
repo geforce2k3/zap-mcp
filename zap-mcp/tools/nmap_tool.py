@@ -1,6 +1,6 @@
 """
-Nmap 偵察工具 (Async / Non-blocking 版)
-解決 MCP Timeout 問題，支援背景執行與狀態檢查
+Nmap 偵察工具 (Async / Non-blocking 版) - 修正版
+解決 MCP Timeout 問題，支援背景執行、狀態檢查與 XML 容錯解析
 """
 import os
 import subprocess
@@ -31,17 +31,34 @@ def is_nmap_running() -> bool:
         return False
 
 
+def _cleanup_old_files():
+    """
+    清除舊的掃描結果與日誌檔案
+    """
+    try:
+        if os.path.exists(NMAP_XML_OUTPUT):
+            os.remove(NMAP_XML_OUTPUT)
+            logger.info(f"已刪除舊的 XML 結果: {NMAP_XML_OUTPUT}")
+        
+        if os.path.exists(NMAP_LOG_FILE):
+            os.remove(NMAP_LOG_FILE)
+            logger.info(f"已刪除舊的 Log 檔案: {NMAP_LOG_FILE}")
+    except Exception as e:
+        logger.warning(f"清除舊檔案失敗: {e}")
+
+
 def _parse_nmap_results() -> str:
     """
     解析 Nmap XML 輸出檔案並回傳摘要
+    具備容錯機制，可處理不完整的 XML
     
     Returns:
-        str: 發現的 Web 服務列表
+        str: 發現的 Web 服務列表或錯誤訊息
     """
-    try:
-        if not os.path.exists(NMAP_XML_OUTPUT):
-            return "尚未產生掃描結果 (檔案不存在)。"
+    if not os.path.exists(NMAP_XML_OUTPUT):
+        return "尚未產生掃描結果 (檔案不存在)。"
 
+    try:
         # 解析 XML
         tree = ET.parse(NMAP_XML_OUTPUT)
         root = tree.getroot()
@@ -107,6 +124,16 @@ def _parse_nmap_results() -> str:
         url_list = '\n'.join(['- ' + url for url in discovered_urls])
         return f"**偵察完成！發現 Web 服務**：\n{url_list}"
 
+    except ET.ParseError:
+        # [關鍵修正] 處理 XML 檔案不完整的情況 (通常是因為掃描中斷)
+        logger.warning("Nmap XML 解析失敗 (ParseError): 檔案可能不完整。")
+        return (
+            "**警告：掃描結果檔案不完整**\n"
+            "這通常是因為掃描過程被強制中斷 (Timeout 或 Memory 不足) 導致 XML 標籤未閉合。\n"
+            "建議：\n"
+            "1. 檢查 Docker 資源限制。\n"
+            "2. 嘗試縮小掃描範圍 (例如只掃描常用 Port)。"
+        )
     except Exception as e:
         logger.error(f"解析 Nmap XML 失敗: {e}")
         return f"解析結果失敗: {str(e)}"
@@ -121,7 +148,7 @@ def run_nmap_recon(target_host: str, ports: str = "top-1000", force_rescan: bool
     Args:
         target_host: 目標主機 (IP 或域名)
         ports: 掃描埠號範圍
-        force_rescan: 若已有結果，是否強制重新掃描
+        force_rescan: 若已有結果，是否強制重新掃描 (True 會刪除舊檔並重跑)
 
     Returns:
         str: 啟動訊息或掃描結果
@@ -129,19 +156,24 @@ def run_nmap_recon(target_host: str, ports: str = "top-1000", force_rescan: bool
     if not is_safe_host(target_host):
         return "錯誤：目標主機包含非法字元。"
 
+    # [關鍵修正] 處理強制重掃邏輯：優先清理舊檔案
+    if force_rescan:
+        logger.info(f"使用者要求強制重掃，正在清除舊檔案: {target_host}")
+        _cleanup_old_files()
+
     # 1. 檢查是否正在執行 (避免重複啟動)
     if is_nmap_running():
+        # 如果是強制重掃，但目前有程序在跑，提示使用者稍後 (或者這裡也可以選擇 kill 掉舊的)
         return f"""
 **Nmap 掃描正在背景進行中...**
 目標: {target_host}
 
 請 **等待約 30-60 秒**，然後使用 `check_status` 查看結果。
-(請勿重複執行此指令)
+(若需強制重啟，請等待當前掃描結束或手動重啟容器)
 """
 
-    # 2. 檢查是否已有結果 (且使用者未要求強制重掃)
-    # 這能節省大量的時間
-    if not force_rescan and os.path.exists(NMAP_XML_OUTPUT):
+    # 2. 檢查是否已有結果 (因為前面如果 force_rescan=True 已經刪檔了，這裡就會自動通過)
+    if os.path.exists(NMAP_XML_OUTPUT):
         # 簡單檢查檔案大小，確保不是空檔
         if os.path.getsize(NMAP_XML_OUTPUT) > 100:
             logger.info("發現現有的 Nmap 結果，直接回傳。")
@@ -151,9 +183,6 @@ def run_nmap_recon(target_host: str, ports: str = "top-1000", force_rescan: bool
     logger.info(f"啟動 Nmap 背景偵察: Target={target_host}, Ports={ports}")
     
     # 建立 Nmap 指令
-    # -T4: 加速掃描
-    # -oN: 輸出文字 Log (方便除錯)
-    # -oX: 輸出 XML (給程式解析)
     nmap_cmd = [
         "nmap", "-sV", "-sC", "--script=vulners", "-O", "--open", "-T4",
         "-oX", NMAP_XML_OUTPUT,
@@ -170,14 +199,12 @@ def run_nmap_recon(target_host: str, ports: str = "top-1000", force_rescan: bool
             nmap_cmd.insert(1, "-p")
 
     try:
-        # [關鍵修改] 使用 Popen 取代 run，實現非阻塞執行
-        # stdout/stderr 導向到檔案，避免 Buffer 塞滿導致卡住
+        # 使用 Popen 取代 run，實現非阻塞執行
         with open(NMAP_LOG_FILE, "w") as log_f:
             subprocess.Popen(
                 nmap_cmd,
                 stdout=log_f,
-                stderr=subprocess.STDOUT,
-                # start_new_session=True # 如果是在 Linux 環境可考慮加入，但在 Docker 內通常不需要
+                stderr=subprocess.STDOUT
             )
             
         return f"""

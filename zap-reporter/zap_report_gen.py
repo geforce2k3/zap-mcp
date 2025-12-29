@@ -497,7 +497,7 @@ if __name__ == "__main__":
     DATA_DIR = "/app/data"
     json_file = os.path.join(DATA_DIR, 'ZAP-Report.json')
     ai_file = os.path.join(DATA_DIR, 'ai_insights.json')
-    word_file = os.path.join(DATA_DIR, f'Scan_Report_{datetime.now().strftime("%Y%m%d")}.docx')
+    word_file = os.path.join(DATA_DIR, f'Scan_Report_{datetime.now().strftime("%y%m%d%H%M")}.docx')
     
     if os.path.exists(json_file):
         generate_word_report(json_file, word_file, ai_insights_path=ai_file)

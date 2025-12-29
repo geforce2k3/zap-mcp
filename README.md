@@ -263,36 +263,39 @@ docker run --rm -v zap_shared_data:/data -v $(pwd):/src alpine cp /src/logo.png 
 ## Prompt Example
 ```
 
-你是一位資深的自動化滲透測試專家。你的任務是依照以下 SOP 對目標進行檢測：
+你是一位資深的自動化滲透測試專家。你的任務是依照以下 SOP 對目標進行檢測:
 
-【階段一：偵察 (Recon)】
-1. 請對 http://nl-bwapp.turn2cloud.net 使用 `nmap_recon` 工具。
-2. 分析回傳結果，找出所有的 HTTP/HTTPS 入口點。
+【階段一:偵察 (Recon)】
+1. 請對 http://nl-bwapp.turn2cloud.net 使用 `nmap_recon` 工具，並且強制重新掃描 force_rescan=True。
+2. 分析回傳結果(xml)，找出所有的入口點，以及目標作業系統版本(web service 透露)，CVE清單。
 
-【階段二：掃描策略 (Strategy)】
-1. `login_and_get_cookie` 取得憑證。`帳號` bee `密碼` bug
-2. 登入後的 URL - http://nl-bwapp.turn2cloud.net/portal.php
-2. 若有 Cookie，準備在下一步呼叫時使用 `auth_header='Cookie'`。
-3. 使用激進模式掃描： `scan_type='full', aggressive=True`。
+【階段二:掃描策略 (Strategy)】
+1. 請根據 nmap 掃描出的 port，透過上面提供的 FQDN 組合出各種連線方式，並寫入報告內。
+2. 如果有登入的頁面,請調用 `login_and_get_cookie` 取得憑證。`帳號` bee `密碼` bug
+3. 登入後的 URL - http://nl-bwapp.turn2cloud.net/portal.php
+4. 若有 Cookie,準備在下一步呼叫時使用 `auth_header='Cookie'`。
+5. 使用激進模式掃描: `scan_type='full', aggressive=True`。
+6. 將組合後的連線方式與第三點提供的 URI，暫存起來,提供給階段三使用
 
-【階段三：執行掃描 (Execution)】
-1. 針對 階段二的 第二點 指定 URI 呼叫 `scan_job`。
+【階段三:執行掃描 (Execution)】
+1. 針對 階段二的 第 6 點的連線方式 呼叫 `scan_job`。
 2. 透過 `check_status` 監控進度。
 
-【階段四：分析與報告 (Reporting)】
-1. 掃描完成後，務必呼叫 `get_analysis` 取得精簡版 Markdown 數據。
-2. 請運用你的資安知識，針對讀取到的弱點進行深度分析（不要只複述數據）。
+【階段四:分析與報告 (Reporting)】
+1. 掃描完成後,務必呼叫 `get_analysis` 取得 Markdown 數據。
+2. 請運用你的資安知識,針對讀取到的弱點進行深度分析(不要只複述數據)。
    - 分析漏洞的潛在影響 (Business Impact)。
    - 提供具體的程式碼修復範例 (Code Fix)。
-3. 將你的分析總結 (Executive Summary) 與詳細修復建議 (Solutions JSON)，傳入 `ai_insights` 工具。
-4. 最後，執行 `export_report` 下載圖文並茂的 Docx 報告。
+3. 將你的分析總結 (Executive Summary) 與詳細修復建議 (Solutions JSON),傳入 `ai_insights` 工具。
+4. 最後,執行 `export_report` 下載圖文並茂的 Docx 報告。
 
 
-* 重要規則：在生成 solutions JSON 時，Key (鍵) 必須嚴格使用掃描報告中的「英文弱點原名 (English Alert Name)」，絕對不要翻譯成中文，也不要自行簡化。Value (值) 的內容則請使用繁體中文撰寫。
+* 重要規則:在生成 solutions JSON 時,Key (鍵) 必須嚴格使用掃描報告中的「英文弱點原名 (English Alert Name)」,絕對不要翻譯成中文,也不要自行簡化。Value (值) 的內容則請使用繁體中文撰寫。
 
-範例指令：
+範例指令:
 
-「請分析報告並產生 solutions JSON。請注意：JSON 的 Key 必須是 "Absence of Anti-CSRF Tokens" 這樣的英文原名，不要寫成 "CSRF 缺失"。內容請用中文。」
+「請分析報告並產生 solutions JSON。請注意:JSON 的 Key 必須是 "Absence of Anti-CSRF Tokens" 這樣的英文原名,不要寫成 "CSRF 缺失"。內容請用中文。」
+
 ```
 
 
